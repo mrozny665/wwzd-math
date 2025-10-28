@@ -1,7 +1,9 @@
 import openai
-
+from environs import Env
+env = Env()
+env.read_env()
 client = openai.OpenAI(
-        api_key=api_key,
+        api_key=env.str("OPENAI_API_KEY"),
         base_url="https://services.clarin-pl.eu/api/v1/oapi/"
     )
 
@@ -12,3 +14,4 @@ response = client.chat.completions.create(
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7
 )
+print(response)
