@@ -13,6 +13,7 @@ class ChatLogic:
         self.content = None
         self.client = None
         self.env = None
+        self.history = []
 
     def read_env(self):
         self.env = Env()
@@ -33,23 +34,23 @@ class ChatLogic:
         )
 
     def call_method(self, user_message: str):
+        self.history.append({
+                "role": "system",
+                "content": (
+                    "Jesteś inteligentnym asystentem konwersacyjnym. "
+                    "Jeśli użytkownik poprosi o wykonanie obliczeń matematycznych, "
+                    "nie odpowiadaj tekstowo, tylko zwróć JSON w formacie:\n"
+                    "{\"action\": \"evaluate_math\", \"action_input\": {\"expression\": \"...\"}}. "
+                    "W pozostałych przypadkach odpowiadaj normalnie po polsku."
+                ),
+            })
+        self.history.append({"role": "user", "content": user_message})
         self.response = self.client.chat.completions.create(
             model="or-gpt-oss-120b",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Jesteś inteligentnym asystentem konwersacyjnym. "
-                        "Jeśli użytkownik poprosi o wykonanie obliczeń matematycznych, "
-                        "nie odpowiadaj tekstowo, tylko zwróć JSON w formacie:\n"
-                        "{\"action\": \"evaluate_math\", \"action_input\": {\"expression\": \"...\"}}. "
-                        "W pozostałych przypadkach odpowiadaj normalnie po polsku."
-                    ),
-                },
-                {"role": "user", "content": user_message},
-            ],
-            temperature=0.2
+            messages=self.history,
+            temperature=0
         )
+        print(self.response)
 
     def read_message(self):
         self.message = self.response.choices[0].message
@@ -60,6 +61,7 @@ class ChatLogic:
         try:
             self.data = json.loads(self.content)
         except json.JSONDecodeError:
+            print(self.data)
             # Jeśli model zwrócił dict w stylu Pythona z apostrofami
             if re.match(r"^\{'.*'\}$", self.content):
                 try:
