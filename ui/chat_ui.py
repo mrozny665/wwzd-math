@@ -5,7 +5,9 @@ from tkinter import ttk, font
 from datetime import datetime
 import json
 import re
+import os
 from typing import Any
+from PIL import Image, ImageTk  # WAŻNE: Wymaga pip install pillow
 
 from ui.chat_store import ChatStore
 from logic.ChatLogic import ChatLogic
@@ -28,6 +30,11 @@ class ChatUI:
         self.chat_logic = chat_logic
         self.store = store
         self._message_widgets = []
+        
+        # LISTA DO PRZECHOWYWANIA REFERENCJI OBRAZKÓW
+        # Bez tego Python usuwa obrazki z pamięci (Garbage Collector) i znikają z ekranu
+        self._image_refs = [] 
+        
         self._setup_root()
         self._create_fonts()
         self._create_layout()
@@ -109,6 +116,7 @@ class ChatUI:
                 text_widget.insert("end", inner)
                 end = text_widget.index("end-1c")
                 text_widget.tag_add("inlinecode", start, end)
+                text_widget.insert("end", part[len("@@INLINECODE"):-2], "inlinecode")
             elif part.startswith("@@CODEBLOCK_RAW_") and part.endswith("@@"):
                 idx = int(part[len("@@CODEBLOCK_RAW_"):-2])
                 code = code_blocks[idx]
@@ -282,38 +290,27 @@ class ChatUI:
                 except Exception:
                     response_obj = None
 
+            # 3. Wyciągnięcie danych
+            response_text = "(Brak odpowiedzi)"
+            image_path = None
+            
             if response_obj is not None:
-                if hasattr(response_obj, "message"):
-                    response_text = getattr(response_obj, "message")
-                else:
-                    response_text = str(response_obj)
-
-            if not response_text:
-                if hasattr(logic, "last_message") and getattr(logic, "last_message") not in (None, ""):
-                    response_text = getattr(logic, "last_message")
-                elif hasattr(logic, "response") and getattr(logic, "response") not in (None, ""):
-                    response_text = getattr(logic, "response")
-
-            if not response_text:
-                response_text = "(Brak odpowiedzi z ChatLogic)"
-
+                response_text = getattr(response_obj, "message", str(response_obj))
+                # Tutaj pobieramy ścieżkę z obiektu ChatResult
+                image_path = getattr(response_obj, "image_path", None)
+            elif logic.last_message:
+                response_text = logic.last_message
+            
+            # 4. Pakowanie do extra dla ChatStore
             extra = {}
             if response_obj is not None:
                 raw = getattr(response_obj, "raw_json", None)
-                content_str = getattr(response_obj, "content", None)
-                content_raw = getattr(response_obj, "content_raw", None)
-                if raw is not None:
-                    extra["raw_json"] = raw
-                if content_str is not None:
-                    extra["content"] = content_str
-                if content_raw is not None:
-                    extra["content_raw"] = content_raw
+                if raw: extra["raw_json"] = raw
+                # WAŻNE: Zapisujemy image_path do historii
+                if image_path: extra["image_path"] = image_path
 
-            try:
-                self.store.append_message("bot", str(response_text), outgoing=False, extra=extra or None)
-            except Exception as e:
-                print("Warn: append incoming:", e)
-
+            # 5. Zapis w bazie i odświeżenie UI
+            self.store.append_message("bot", str(response_text), outgoing=False, extra=extra)
             self.root.after(0, lambda: self.refresh_from_store())
 
         except Exception as e:
@@ -325,6 +322,9 @@ class ChatUI:
         for w in self.msgs_frame.winfo_children():
             w.destroy()
         self._message_widgets.clear()
+        
+        # WAŻNE: Czyścimy referencje obrazków przy każdym odświeżeniu
+        self._image_refs.clear()
 
         for rec in msgs:
             role = rec.get("role", "bot")
@@ -363,12 +363,14 @@ class ChatUI:
         bubble = tk.Frame(wrapper, bg=BG_MAIN)
         bubble.pack(fill="x", anchor="w")
 
+        # 1. Tekst
         txt = tk.Text(bubble, bg=BG_MAIN, fg=TEXT_COLOR, bd=0, wrap="word", height=1, padx=6, pady=4,
                       highlightthickness=0, insertbackground="white")
         txt.pack(fill="x", anchor="w", padx=(12, 0))
 
         try:
-            self._render_markdown_to_text(txt, text, max_height=30)
+            h = self._render_markdown_to_text(txt, text) 
+            txt.configure(height=h)
         except Exception as e:
             txt.configure(state="normal")
             txt.delete("1.0", "end")
@@ -376,107 +378,66 @@ class ChatUI:
             txt.configure(state="disabled")
             print("Warn: markdown render failed:", e)
 
+        # 2. Obrazek (jeśli istnieje w extra)
+        extra = rec.get("extra", {})
+        img_path = extra.get("image_path")
+        
+        if img_path:
+            self._render_image(bubble, img_path)
+
+        # 3. Przyciski (JSON)
         buttons_row = tk.Frame(wrapper, bg=BG_MAIN)
         buttons_row.pack(fill="x", padx=12, pady=(6, 0))
-
-        btn_style_kwargs = {
-            "bg": BG_MAIN, "fg": TEXT_COLOR, "activebackground": BG_MAIN,
-            "activeforeground": TEXT_COLOR, "relief": "flat", "bd": 0, "cursor": "hand2",
-            "disabledforeground": TEXT_COLOR_FADED
-        }
-
-        def _make_button(parent, text_btn, cmd):
-            b = tk.Button(parent, text=text_btn, command=cmd, **btn_style_kwargs)
-            b.configure(highlightthickness=1, highlightbackground=CARD_BG, highlightcolor=CARD_BG, padx=8, pady=4)
-            b.pack(side="left", padx=(0, 8))
-            return b
-
-        # pokaż pełen JSON całego rekordu
-        json_details_frame = tk.Frame(wrapper, bg=BG_HIDDEN_PANEL)
-        json_text = tk.Text(json_details_frame, height=20, bg=BG_HIDDEN_PANEL, fg=TEXT_COLOR_FADED,
-                            bd=0, padx=8, pady=8, wrap="word")
-        try:
-            pretty = json.dumps(rec, indent=2, ensure_ascii=False)
-        except Exception:
-            pretty = str(rec)
-        json_text.insert("1.0", pretty)
-        json_text.configure(state="disabled")
-        json_text.pack(fill="x")
+        
+        json_frame = tk.Frame(wrapper, bg=BG_HIDDEN_PANEL)
+        jtext = tk.Text(json_frame, height=10, bg=BG_HIDDEN_PANEL, fg=TEXT_COLOR_FADED, bd=0, padx=8, pady=8)
+        try: pretty = json.dumps(rec, indent=2, ensure_ascii=False)
+        except: pretty = str(rec)
+        jtext.insert("1.0", pretty)
+        jtext.configure(state="disabled")
+        jtext.pack(fill="x")
 
         def _toggle_json():
-            if json_details_frame.winfo_ismapped():
-                json_details_frame.pack_forget()
-            else:
-                json_details_frame.pack(fill="x", padx=12, pady=(6, 0))
-                self.canvas.yview_moveto(1.0)
+            if json_frame.winfo_ismapped(): json_frame.pack_forget()
+            else: json_frame.pack(fill="x", padx=12, pady=6); self.canvas.yview_moveto(1.0)
 
-        _make_button(buttons_row, "Pokaż JSON", _toggle_json)
+        b = tk.Button(buttons_row, text="JSON", command=_toggle_json, bg=BG_MAIN, fg=TEXT_COLOR, relief="flat", activebackground=BG_MAIN)
+        b.pack(side="left")
 
-        info_frame = tk.Frame(wrapper, bg=BG_HIDDEN_PANEL)
-        def _toggle_info():
-            if info_frame.winfo_ismapped():
-                info_frame.pack_forget()
-            else:
-                for c in info_frame.winfo_children():
-                    c.destroy()
-                self._build_info_block(info_frame, rec)
-                info_frame.pack(fill="x", padx=12, pady=(6, 0))
-                self.canvas.yview_moveto(1.0)
-
-        _make_button(buttons_row, "Informacje", _toggle_info)
         self._message_widgets.append((wrapper, rec))
 
-    def _build_info_block(self, frame: tk.Frame, rec: dict):
-        extra = rec.get("extra", {})
-        raw = extra.get("raw_json", {})
-        usage = raw.get("usage", {})
-        reasoning = None
+    # --- RYSOWANIE OBRAZKA ---
+    def _render_image(self, parent, path):
+        if not os.path.exists(path):
+            err = tk.Label(parent, text=f"[Plik nie istnieje: {path}]", bg=BG_MAIN, fg="red")
+            err.pack(anchor="w", padx=12)
+            return
+
         try:
-            choices = raw.get("choices")
-            if choices and isinstance(choices, list) and len(choices) > 0:
-                first = choices[0]
-                msg = first.get("message") or {}
-                reasoning = msg.get("reasoning")
-        except Exception:
-            pass
+            # Ładowanie przez PIL
+            pil_img = Image.open(path)
+            
+            # Skalowanie, jeśli za szeroki
+            max_w = 600
+            w, h = pil_img.size
+            if w > max_w:
+                ratio = max_w / w
+                new_size = (int(w * ratio), int(h * ratio))
+                pil_img = pil_img.resize(new_size, Image.Resampling.LANCZOS)
+            
+            # Konwersja na format Tkinter
+            tk_img = ImageTk.PhotoImage(pil_img)
+            
+            # WAŻNE: Dodanie do listy referencji
+            self._image_refs.append(tk_img) 
 
-        def add_line(label, value):
-            row = tk.Frame(frame, bg=BG_HIDDEN_PANEL)
-            row.pack(fill="x", padx=8, pady=2, anchor="w")
-            tk.Label(row, text=f"{label}:", bg=BG_HIDDEN_PANEL, fg=TEXT_COLOR_FADED).pack(side="left")
-            tk.Label(row, text=value, bg=BG_HIDDEN_PANEL, fg=TEXT_COLOR, wraplength=self._compute_wraplength(), justify="left").pack(side="left", padx=(6, 0))
-
-        if rec.get("timestamp"):
-            add_line("Czas", rec.get("timestamp"))
-        if rec.get("id"):
-            add_line("Identyfikator", rec.get("id"))
-        add_line("Rola", rec.get("role"))
-        add_line("Wychodząca", rec.get("outgoing"))
-
-        if extra.get("content_raw"):
-            add_line("Zawartość surowa", str(extra.get("content_raw")))
-
-        if usage:
-            usage_pretty = (
-                f"  Tokeny promptu: {usage.get('prompt_tokens', 0)}\n"
-                f"  Tokeny odpowiedzi: {usage.get('completion_tokens', 0)}\n"
-                f"  Suma tokenów: {usage.get('total_tokens', 0)}"
-            )
-            add_line("Zużycie tokenów", usage_pretty)
-
-        if reasoning:
-            add_line("Uzasadnienie modelu", reasoning)
-
-    def _compute_wraplength(self):
-        try:
-            w = self.canvas.winfo_width()
-            if w and w > 20:
-                pad = 40
-                usable = max(0, w - pad)
-                return max(MIN_BUBBLE, int(usable * BUBBLE_RATIO))
-        except Exception:
-            pass
-        return max(MIN_BUBBLE, int(WINDOW_W * BUBBLE_RATIO))
+            # Wyświetlenie w Label
+            lbl = tk.Label(parent, image=tk_img, bg=BG_MAIN, bd=0)
+            lbl.pack(anchor="w", padx=(12, 0), pady=10)
+            
+        except Exception as e:
+            err = tk.Label(parent, text=f"[Błąd obrazka: {e}]", bg=BG_MAIN, fg="red")
+            err.pack(anchor="w", padx=12)
 
     def _update_wraps(self, width):
         pad = 40
@@ -495,15 +456,12 @@ class ChatUI:
     def _deferred_update_wraps(self):
         try:
             w = self.canvas.winfo_width()
-            if w > 10:
-                self._update_wraps(w)
+            if w > 10: 
                 self.canvas.itemconfig(self.msgs_window, width=w)
+                self._update_wraps(w)
         except Exception:
             pass
 
-    def _show_internal_message(self, text: str):
-        try:
-            self.store.append_message("bot", text, outgoing=False, extra={"internal": True})
-        except Exception:
-            pass
+    def _show_internal_message(self, text):
+        self.store.append_message("bot", text, False, {"internal": True})
         self.refresh_from_store()

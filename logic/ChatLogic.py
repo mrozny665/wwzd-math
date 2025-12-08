@@ -6,12 +6,25 @@ import math
 import re
 import ast
 import operator as op
+import os
+import uuid
 from typing import Any, Optional
+
+# --- Importy do wykresów ---
+import matplotlib
+# Ustaw backend na Agg, aby uniknąć błędów GUI w wątkach
+matplotlib.use("Agg") 
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Upewnij się, że katalog na obrazy istnieje
+IMAGES_DIR = os.path.join("ui", "images")
+os.makedirs(IMAGES_DIR, exist_ok=True)
 
 class ChatResult:
     """Reprezentuje wynik jednej interakcji z modelem."""
     def __init__(self, message, raw_json=None, content=None, action=None,
-                 expression=None, result=None, error=None, success=True):
+                 expression=None, result=None, error=None, success=True, image_path=None):
         self.message = message
         self.raw_json = raw_json
         self.content = content
@@ -20,9 +33,10 @@ class ChatResult:
         self.result = result
         self.error = error
         self.success = success
+        self.image_path = image_path
 
     def __repr__(self):
-        return f"<ChatResult success={self.success} action={self.action} msg={self.message!r}>"
+        return f"<ChatResult success={self.success} action={self.action} img={self.image_path}>"
 
 
 class ChatLogic:
@@ -90,22 +104,25 @@ class ChatLogic:
         ast.UAdd: op.pos,
     }
 
-    def _eval_ast(self, node):
+    def _eval_ast(self, node, variables=None):
+        if variables is None:
+            variables = {}
+        
         if isinstance(node, ast.Expression):
-            return self._eval_ast(node.body)
+            return self._eval_ast(node.body, variables)
         if isinstance(node, ast.Constant):  # Python 3.8+
             return node.value
         if isinstance(node, ast.Num):  # compatibility
             return node.n
         if isinstance(node, ast.BinOp):
-            left = self._eval_ast(node.left)
-            right = self._eval_ast(node.right)
+            left = self._eval_ast(node.left, variables)
+            right = self._eval_ast(node.right, variables)
             op_type = type(node.op)
             if op_type in self._ALLOWED_OPERATORS:
                 return self._ALLOWED_OPERATORS[op_type](left, right)
             raise ValueError(f"Operator {op_type} not allowed")
         if isinstance(node, ast.UnaryOp):
-            operand = self._eval_ast(node.operand)
+            operand = self._eval_ast(node.operand, variables)
             op_type = type(node.op)
             if op_type in self._ALLOWED_OPERATORS:
                 return self._ALLOWED_OPERATORS[op_type](operand)
@@ -117,28 +134,92 @@ class ChatLogic:
             if func_name not in self._ALLOWED_NAMES:
                 raise ValueError(f"Function {func_name} not allowed")
             func = self._ALLOWED_NAMES[func_name]
-            args = [self._eval_ast(a) for a in node.args]
+            args = [self._eval_ast(a, variables) for a in node.args]
             return func(*args)
         if isinstance(node, ast.Name):
+            # TU JEST KLUCZOWA ZMIANA: sprawdzamy czy nazwa jest w zmiennych (np. x)
+            if node.id in variables:
+                return variables[node.id]
             if node.id in self._ALLOWED_NAMES:
                 return self._ALLOWED_NAMES[node.id]
             raise ValueError(f"Use of name {node.id} not allowed")
         # nie pozwalamy na nic więcej (No Attribute, Subscript, Lambda itp.)
         raise ValueError(f"Unsupported AST node: {type(node).__name__}")
 
-    def safe_eval_math(self, expression: str):
+    def safe_eval_math(self, expression: str, variables=None):
         try:
             # drobne sanity: zamień ^ na ** (użytkownicy mogą użyć ^)
             expr = expression.replace("^", "**")
             # usuń niebezpieczne znaki (tylko jako prosty filter — dalej AST zadba o bezpieczeństwo)
             # parsuj AST i ewaluuj
             parsed = ast.parse(expr, mode="eval")
-            val = self._eval_ast(parsed)
+            val = self._eval_ast(parsed, variables)
             return {"result": val}
         except Exception as e:
             return {"error": str(e)}
 
-    # ---- inicjalizacja klienta ----
+    # ---- Generowanie Wykresu (POPRAWIONE) ----
+    def _generate_plot_image(self, expression: str, x_min=-10, x_max=10):
+        """Generuje wykres za pomocą matplotlib i zapisuje do pliku."""
+        try:
+            x_values = np.linspace(x_min, x_max, 200)
+            y_values = []
+            expr_clean = expression.replace("^", "**")
+            parsed = ast.parse(expr_clean, mode="eval")
+
+            for x in x_values:
+                res = self._eval_ast(parsed, variables={"x": x})
+                y_values.append(res)
+            
+            # Tworzenie figury
+            plt.figure(figsize=(6, 4), dpi=100)
+            
+            # Rysowanie linii
+            plt.plot(x_values, y_values, label=f"f(x) = {expression}", color="#849FF5", linewidth=2)
+            
+            # Linie pomocnicze (osie)
+            plt.axhline(0, color='gray', linewidth=0.8, linestyle='--')
+            plt.axvline(0, color='gray', linewidth=0.8, linestyle='--')
+            plt.grid(True, linestyle=':', alpha=0.6)
+            
+            # Legenda i tytuł (ustawiamy kolor od razu tutaj)
+            plt.title("Wykres funkcji", color='#C3C3C5')
+            plt.legend()
+            
+            # Stylizacja pod ciemny motyw
+            ax = plt.gca()
+            ax.set_facecolor('#28282A')
+            fig = plt.gcf()
+            fig.patch.set_facecolor('#28282A')
+            
+            # Kolory osi i etykiet
+            ax.tick_params(colors='#C3C3C5')
+            ax.yaxis.label.set_color('#C3C3C5')
+            ax.xaxis.label.set_color('#C3C3C5')
+            for spine in ax.spines.values():
+                spine.set_edgecolor('#555555')
+
+            # Bezpieczna zmiana koloru tekstu legendy
+            legend = ax.get_legend()
+            if legend:
+                for text in legend.get_texts():
+                    text.set_color("#333333")
+
+            # Zapis do pliku
+            filename = f"plot_{uuid.uuid4().hex}.png"
+            path = os.path.join(IMAGES_DIR, filename)
+            plt.savefig(path, bbox_inches='tight')
+            plt.close() # Zamknij figurę, aby zwolnić pamięć
+            
+            return path
+        except Exception as e:
+            print(f"Plot generation error: {e}")
+            # Zamknij plot w razie błędu, żeby nie wisiał w pamięci
+            try: plt.close() 
+            except: pass
+            return None
+
+    # ---- Inicjalizacja klienta ----
     def init_client(self):
         self.client = openai.OpenAI(
             api_key=self.env.str("OPENAI_API_KEY"),
@@ -152,10 +233,12 @@ class ChatLogic:
             self.history.append({
                 "role": "system",
                 "content": (
-                    "Jesteś inteligentnym asystentem konwersacyjnym. "
-                    "Jeśli użytkownik poprosi o wykonanie obliczeń matematycznych, "
-                    "nie odpowiadaj tekstowo, tylko zwróć JSON w formacie:\n"
-                    "{\"action\": \"evaluate_math\", \"action_input\": {\"expression\": \"...\"}}. "
+                    "Jesteś zaawansowanym asystentem, który POTRAFI wykonywać obliczenia i generować wykresy. "
+                    "Masz do dyspozycji specjalne komendy w formacie JSON. "
+                    "Gdy użytkownik prosi o wykres, NIE TŁUMACZ, że nie potrafisz. Zamiast tego zwróć JSON.\n\n"
+                    "FORMATY KOMEND (używaj tylko ich do zadań specjalnych):\n"
+                    "1. OBLICZENIA (np. 2+2): {\"action\": \"evaluate_math\", \"action_input\": {\"expression\": \"...\"}}\n"
+                    "2. WYKRES (np. 'narysuj x^2'): {\"action\": \"plot_function\", \"action_input\": {\"expression\": \"...\", \"min\": -10, \"max\": 10}}\n\n"
                     "W pozostałych przypadkach odpowiadaj normalnie po polsku."
                 ),
             })
@@ -312,42 +395,65 @@ class ChatLogic:
         result_value = None
         error_value = None
         success = True
+        image_path = None
 
-        if isinstance(self.data, dict) and self.data.get("action") in ("evaluate_math", "evaluate"):
-            action = self.data.get("action")
-            expr = None
-            try:
-                ai = self.data.get("action_input") or self.data.get("action_input", {})
-                if isinstance(ai, dict):
-                    expr = ai.get("expression", "")
-                else:
-                    expr = self.data.get("expression", "")
-            except Exception:
-                expr = self.data.get("expression", "")
+        # Funkcja pomocnicza: normalizuje klucze (usuwa _ i zmniejsza litery)
+        def normalize(s):
+            return str(s).lower().replace("_", "") if s else ""
 
-            message_text += f"📞 Model wykrył działanie: {expr}\n"
-            math_res = self.safe_eval_math(expr)
-            if "result" in math_res:
-                result_value = math_res["result"]
-                message_text += f"🧮 Wynik obliczenia: {expr} = {result_value}"
-            else:
-                error_value = math_res.get("error", "Nieznany błąd")
-                message_text += f"⚠️ Błąd podczas obliczania: {error_value}"
-                success = False
-        else:
+        if isinstance(self.data, dict):
+            raw_action = self.data.get("action")
+            action = normalize(raw_action)
+            
+            ai = self.data.get("action_input") or self.data.get("actioninput") or {}
+
+            # --- EVALUATE MATH ---
+            if action in ("evaluatemath", "evaluate"):
+                try:
+                    expr = ai.get("expression") if isinstance(ai, dict) else self.data.get("expression")
+                except: expr = ""
+                
+                if expr:
+                    message_text += f"📞 Model wykrył działanie: {expr}\n"
+                    math_res = self.safe_eval_math(expr)
+                    if "result" in math_res:
+                        result_value = math_res["result"]
+                        message_text += f"🧮 Wynik: {result_value}"
+                    else:
+                        error_value = math_res.get("error")
+                        message_text += f"⚠️ Błąd: {error_value}"
+                        success = False
+            
+            # --- PLOT FUNCTION ---
+            elif action == "plotfunction":
+                try:
+                    expr = ai.get("expression")
+                    x_min = float(ai.get("min", -10))
+                    x_max = float(ai.get("max", 10))
+                except:
+                    expr = "x"
+                    x_min, x_max = -10, 10
+                
+                if expr:
+                    message_text += f"📉 Generuję wykres funkcji: f(x) = {expr}"
+                    path = self._generate_plot_image(expr, x_min, x_max)
+                    if path:
+                        image_path = path
+                        message_text += "\n(Wykres wygenerowany)"
+                    else:
+                        message_text += "\n⚠️ Błąd generowania wykresu."
+                        success = False
+
+        # Fallback: Jeśli nie wykryto akcji lub wygenerowanie się nie udało, ale mamy dane
+        if not message_text and not image_path:
             if isinstance(self.content, str):
-                message_text += self.content
-            elif isinstance(self.content, (dict, list)):
-                try:
-                    message_text += json.dumps(self.content, ensure_ascii=False)
-                except Exception:
-                    message_text += str(self.content)
+                message_text = self.content
             else:
-                try:
-                    message_text += str(self.response)
-                except Exception:
-                    message_text += "(brak odpowiedzi)"
-
+                # Jeśli sparsowaliśmy dane, ale nie pasowały do żadnej akcji, wyświetl je jako JSON string
+                if self.data:
+                    message_text = json.dumps(self.data, ensure_ascii=False)
+                else:
+                    message_text = str(self.content or "(Brak treści)")
 
         raw_for_store = None
         if self.last_raw_completion is not None:
@@ -365,6 +471,7 @@ class ChatLogic:
             expression=expr,
             result=result_value,
             error=error_value,
-            success=success
+            success=success,
+            image_path=image_path
         )
         return cr
