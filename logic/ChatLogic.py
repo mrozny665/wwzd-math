@@ -9,6 +9,7 @@ import operator as op
 import os
 import uuid
 from typing import Any, Optional
+from logic.calculus_engine import CalculusEngine
 
 # --- Importy do wykresów ---
 import matplotlib
@@ -50,6 +51,7 @@ class ChatLogic:
         self.history = []
         self.last_raw_completion = None  # <- tu zachowamy pełny surowy obiekt od providera
         self._system_added = False
+        self.calculus_engine = CalculusEngine()
 
     def read_env(self):
         self.env = Env()
@@ -158,6 +160,92 @@ class ChatLogic:
         except Exception as e:
             return {"error": str(e)}
 
+    def _coerce_action_input(self, container: Any) -> dict:
+        """Zwraca dict z action_input lub fallbackiem na klucz expression."""
+        if not isinstance(container, dict):
+            return {}
+        ai = container.get("action_input")
+        if isinstance(ai, dict):
+            return ai
+        if isinstance(ai, (str, int, float)):
+            return {"expression": str(ai)}
+        fallback_keys = (
+            "expression", "expr", "variable", "var", "order", "nth",
+            "at", "point", "value", "evaluate_at", "bounds", "limits",
+            "lower", "upper", "from", "to", "a", "b"
+        )
+        fallback = {}
+        for key in fallback_keys:
+            if key in container and container[key] is not None:
+                fallback[key] = container[key]
+        return fallback
+
+    def _handle_math_action(self, expr: str):
+        expr_display = "" if expr is None else str(expr)
+        message = f"📞 Model wykrył działanie: {expr_display}\n"
+        math_res = self.safe_eval_math(expr)
+        if "result" in math_res:
+            result_value = math_res["result"]
+            message += f"🧮 Wynik obliczenia: {expr_display} = {result_value}"
+            return message, result_value, None, True
+        error_value = math_res.get("error", "Nieznany błąd")
+        message += f"⚠️ Błąd podczas obliczania: {error_value}"
+        return message, None, error_value, False
+
+    def _handle_derivative_action(self, payload: dict, expr: str):
+        expr_display = "" if expr is None else str(expr)
+        message = f"📞 Model poprosił o pochodną: {expr_display}\n"
+        diff_res = self.calculus_engine.differentiate(payload)
+        if "error" in diff_res:
+            error_value = diff_res["error"]
+            message += f"⚠️ {error_value}"
+            return message, None, error_value, False
+        derivative_txt = diff_res.get("derivative")
+        message += f"🧮 Wynik obliczenia: {derivative_txt}"
+        if diff_res.get("value_at") is not None and diff_res.get("at") is not None:
+            message += f"\n📏 W punkcie {diff_res['at']}: {diff_res['value_at']}"
+        if diff_res.get("value_error"):
+            message += f"\n⚠️ {diff_res['value_error']}"
+        return message, diff_res, None, True
+
+    def _handle_integral_action(self, payload: dict, expr: str):
+        expr_display = "" if expr is None else str(expr)
+        message = f"📞 Model poprosił o całkę: {expr_display}\n"
+        integral_res = self.calculus_engine.integrate(payload)
+        if "error" in integral_res:
+            error_value = integral_res["error"]
+            message += f"⚠️ {error_value}"
+            return message, None, error_value, False
+        variable = integral_res.get("variable", "x")
+        integral_result = integral_res.get("integral_result")
+        if integral_res.get("type") == "definite" and integral_res.get("value") is not None:
+            lower = integral_res.get("lower")
+            upper = integral_res.get("upper")
+            value = integral_res.get("value")
+            message += (
+                f"∫[{lower}, {upper}] {expr_display} d{variable} = {value}\n"
+                f"Wynik całki: {integral_result}"
+            )
+        else:
+            message += f"🧮 Wynik całki: ∫ {expr_display} d{variable} = {integral_result} + C"
+        if integral_res.get("value_error"):
+            message += f"\n⚠️ {integral_res['value_error']}"
+        return message, integral_res, None, True
+
+    def _handle_default_response(self):
+        if isinstance(self.content, str):
+            return self.content
+        if isinstance(self.content, (dict, list)):
+            try:
+                return json.dumps(self.content, ensure_ascii=False)
+            except Exception:
+                return str(self.content)
+        try:
+            return str(self.response)
+        except Exception:
+            return "(brak odpowiedzi)"
+
+    # ---- inicjalizacja klienta ----
     # ---- Generowanie Wykresu (POPRAWIONE) ----
     def _generate_plot_image(self, expression: str, x_min=-10, x_max=10):
         """Generuje wykres za pomocą matplotlib i zapisuje do pliku."""
@@ -233,6 +321,14 @@ class ChatLogic:
             self.history.append({
                 "role": "system",
                 "content": (
+                    "Jesteś inteligentnym asystentem konwersacyjnym. "
+                    "Jeśli użytkownik poprosi o wykonanie obliczeń matematycznych, "
+                    "nie odpowiadaj tekstowo, tylko zwróć JSON w formacie:\n"
+                    "{\"action\": \"evaluate_math\", \"action_input\": {\"expression\": \"...\"}}. "
+                    "Dla próśb o pochodne zwróć JSON:\n"
+                    "{\"action\": \"differentiate\", \"action_input\": {\"expression\": \"...\", \"variable\": \"x\", \"order\": 1, \"at\": null}}. "
+                    "Dla całek zwróć JSON:\n"
+                    "{\"action\": \"integrate\", \"action_input\": {\"expression\": \"...\", \"variable\": \"x\", \"bounds\": [dolna, górna]}}. "
                     "Jesteś zaawansowanym asystentem, który POTRAFI wykonywać obliczenia i generować wykresy. "
                     "Masz do dyspozycji specjalne komendy w formacie JSON. "
                     "Gdy użytkownik prosi o wykres, NIE TŁUMACZ, że nie potrafisz. Zamiast tego zwróć JSON.\n\n"
@@ -396,6 +492,34 @@ class ChatLogic:
         error_value = None
         success = True
         image_path = None
+
+        data_dict = self.data if isinstance(self.data, dict) else None
+        raw_action = data_dict.get("action") if data_dict else None
+        action_lower = raw_action.lower() if isinstance(raw_action, str) else None
+
+        if action_lower in ("evaluate_math", "evaluate"):
+            action = raw_action
+            ai = self._coerce_action_input(data_dict or {})
+            expr_value = ai.get("expression")
+            expr = "" if expr_value is None else str(expr_value)
+            msg, result_value, error_value, success = self._handle_math_action(expr)
+            message_text += msg
+        elif action_lower in ("differentiate", "derivative"):
+            action = raw_action
+            ai = self._coerce_action_input(data_dict or {})
+            expr_value = ai.get("expression")
+            expr = "" if expr_value is None else str(expr_value)
+            msg, result_value, error_value, success = self._handle_derivative_action(ai, expr)
+            message_text += msg
+        elif action_lower in ("integrate", "integral"):
+            action = raw_action
+            ai = self._coerce_action_input(data_dict or {})
+            expr_value = ai.get("expression")
+            expr = "" if expr_value is None else str(expr_value)
+            msg, result_value, error_value, success = self._handle_integral_action(ai, expr)
+            message_text += msg
+        else:
+            message_text += self._handle_default_response()
 
         # Funkcja pomocnicza: normalizuje klucze (usuwa _ i zmniejsza litery)
         def normalize(s):
