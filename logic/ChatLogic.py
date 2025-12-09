@@ -8,12 +8,26 @@ import math
 import re
 import ast
 import operator as op
+import os
+import uuid
 from typing import Any, Optional
+from logic.calculus_engine import CalculusEngine
+
+# --- Importy do wykresów ---
+import matplotlib
+# Ustaw backend na Agg, aby uniknąć błędów GUI w wątkach
+matplotlib.use("Agg") 
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Upewnij się, że katalog na obrazy istnieje
+IMAGES_DIR = os.path.join("ui", "images")
+os.makedirs(IMAGES_DIR, exist_ok=True)
 
 class ChatResult:
     """Reprezentuje wynik jednej interakcji z modelem."""
     def __init__(self, message, raw_json=None, content=None, action=None,
-                 expression=None, result=None, error=None, success=True):
+                 expression=None, result=None, error=None, success=True, image_path=None):
         self.message = message
         self.raw_json = raw_json
         self.content = content
@@ -22,9 +36,10 @@ class ChatResult:
         self.result = result
         self.error = error
         self.success = success
+        self.image_path = image_path
 
     def __repr__(self):
-        return f"<ChatResult success={self.success} action={self.action} msg={self.message!r}>"
+        return f"<ChatResult success={self.success} action={self.action} img={self.image_path}>"
 
 
 class ChatLogic:
@@ -38,6 +53,7 @@ class ChatLogic:
         self.history = []
         self.last_raw_completion = None  # <- tu zachowamy pełny surowy obiekt od providera
         self._system_added = False
+        self.calculus_engine = CalculusEngine()
 
     def read_env(self):
         self.env = Env()
@@ -92,22 +108,25 @@ class ChatLogic:
         ast.UAdd: op.pos,
     }
 
-    def _eval_ast(self, node):
+    def _eval_ast(self, node, variables=None):
+        if variables is None:
+            variables = {}
+        
         if isinstance(node, ast.Expression):
-            return self._eval_ast(node.body)
+            return self._eval_ast(node.body, variables)
         if isinstance(node, ast.Constant):  # Python 3.8+
             return node.value
         if isinstance(node, ast.Num):  # compatibility
             return node.n
         if isinstance(node, ast.BinOp):
-            left = self._eval_ast(node.left)
-            right = self._eval_ast(node.right)
+            left = self._eval_ast(node.left, variables)
+            right = self._eval_ast(node.right, variables)
             op_type = type(node.op)
             if op_type in self._ALLOWED_OPERATORS:
                 return self._ALLOWED_OPERATORS[op_type](left, right)
             raise ValueError(f"Operator {op_type} not allowed")
         if isinstance(node, ast.UnaryOp):
-            operand = self._eval_ast(node.operand)
+            operand = self._eval_ast(node.operand, variables)
             op_type = type(node.op)
             if op_type in self._ALLOWED_OPERATORS:
                 return self._ALLOWED_OPERATORS[op_type](operand)
@@ -119,23 +138,26 @@ class ChatLogic:
             if func_name not in self._ALLOWED_NAMES:
                 raise ValueError(f"Function {func_name} not allowed")
             func = self._ALLOWED_NAMES[func_name]
-            args = [self._eval_ast(a) for a in node.args]
+            args = [self._eval_ast(a, variables) for a in node.args]
             return func(*args)
         if isinstance(node, ast.Name):
+            # TU JEST KLUCZOWA ZMIANA: sprawdzamy czy nazwa jest w zmiennych (np. x)
+            if node.id in variables:
+                return variables[node.id]
             if node.id in self._ALLOWED_NAMES:
                 return self._ALLOWED_NAMES[node.id]
             raise ValueError(f"Use of name {node.id} not allowed")
         # nie pozwalamy na nic więcej (No Attribute, Subscript, Lambda itp.)
         raise ValueError(f"Unsupported AST node: {type(node).__name__}")
 
-    def safe_eval_math(self, expression: str):
+    def safe_eval_math(self, expression: str, variables=None):
         try:
             # drobne sanity: zamień ^ na ** (użytkownicy mogą użyć ^)
             expr = expression.replace("^", "**")
             # usuń niebezpieczne znaki (tylko jako prosty filter — dalej AST zadba o bezpieczeństwo)
             # parsuj AST i ewaluuj
             parsed = ast.parse(expr, mode="eval")
-            val = self._eval_ast(parsed)
+            val = self._eval_ast(parsed, variables)
             return {"result": val}
         except Exception as e:
             return {"error": str(e)}
@@ -283,8 +305,154 @@ class ChatLogic:
             return {"success": False, "error": f"Stopień {max_deg} nieobsługiwany"}
         except Exception as e:
             return {"success": False, "error": str(e)}
+    def _coerce_action_input(self, container: Any) -> dict:
+        """Zwraca dict z action_input lub fallbackiem na klucz expression."""
+        if not isinstance(container, dict):
+            return {}
+        ai = container.get("action_input")
+        if isinstance(ai, dict):
+            return ai
+        if isinstance(ai, (str, int, float)):
+            return {"expression": str(ai)}
+        fallback_keys = (
+            "expression", "expr", "variable", "var", "order", "nth",
+            "at", "point", "value", "evaluate_at", "bounds", "limits",
+            "lower", "upper", "from", "to", "a", "b"
+        )
+        fallback = {}
+        for key in fallback_keys:
+            if key in container and container[key] is not None:
+                fallback[key] = container[key]
+        return fallback
+
+    def _handle_math_action(self, expr: str):
+        expr_display = "" if expr is None else str(expr)
+        message = f"📞 Model wykrył działanie: {expr_display}\n"
+        math_res = self.safe_eval_math(expr)
+        if "result" in math_res:
+            result_value = math_res["result"]
+            message += f"🧮 Wynik obliczenia: {expr_display} = {result_value}"
+            return message, result_value, None, True
+        error_value = math_res.get("error", "Nieznany błąd")
+        message += f"⚠️ Błąd podczas obliczania: {error_value}"
+        return message, None, error_value, False
+
+    def _handle_derivative_action(self, payload: dict, expr: str):
+        expr_display = "" if expr is None else str(expr)
+        message = f"📞 Model poprosił o pochodną: {expr_display}\n"
+        diff_res = self.calculus_engine.differentiate(payload)
+        if "error" in diff_res:
+            error_value = diff_res["error"]
+            message += f"⚠️ {error_value}"
+            return message, None, error_value, False
+        derivative_txt = diff_res.get("derivative")
+        message += f"🧮 Wynik obliczenia: {derivative_txt}"
+        if diff_res.get("value_at") is not None and diff_res.get("at") is not None:
+            message += f"\n📏 W punkcie {diff_res['at']}: {diff_res['value_at']}"
+        if diff_res.get("value_error"):
+            message += f"\n⚠️ {diff_res['value_error']}"
+        return message, diff_res, None, True
+
+    def _handle_integral_action(self, payload: dict, expr: str):
+        expr_display = "" if expr is None else str(expr)
+        message = f"📞 Model poprosił o całkę: {expr_display}\n"
+        integral_res = self.calculus_engine.integrate(payload)
+        if "error" in integral_res:
+            error_value = integral_res["error"]
+            message += f"⚠️ {error_value}"
+            return message, None, error_value, False
+        variable = integral_res.get("variable", "x")
+        integral_result = integral_res.get("integral_result")
+        if integral_res.get("type") == "definite" and integral_res.get("value") is not None:
+            lower = integral_res.get("lower")
+            upper = integral_res.get("upper")
+            value = integral_res.get("value")
+            message += (
+                f"∫[{lower}, {upper}] {expr_display} d{variable} = {value}\n"
+                f"Wynik całki: {integral_result}"
+            )
+        else:
+            message += f"🧮 Wynik całki: ∫ {expr_display} d{variable} = {integral_result} + C"
+        if integral_res.get("value_error"):
+            message += f"\n⚠️ {integral_res['value_error']}"
+        return message, integral_res, None, True
+
+    def _handle_default_response(self):
+        if isinstance(self.content, str):
+            return self.content
+        if isinstance(self.content, (dict, list)):
+            try:
+                return json.dumps(self.content, ensure_ascii=False)
+            except Exception:
+                return str(self.content)
+        try:
+            return str(self.response)
+        except Exception:
+            return "(brak odpowiedzi)"
 
     # ---- inicjalizacja klienta ----
+    # ---- Generowanie Wykresu (POPRAWIONE) ----
+    def _generate_plot_image(self, expression: str, x_min=-10, x_max=10):
+        """Generuje wykres za pomocą matplotlib i zapisuje do pliku."""
+        try:
+            x_values = np.linspace(x_min, x_max, 200)
+            y_values = []
+            expr_clean = expression.replace("^", "**")
+            parsed = ast.parse(expr_clean, mode="eval")
+
+            for x in x_values:
+                res = self._eval_ast(parsed, variables={"x": x})
+                y_values.append(res)
+            
+            # Tworzenie figury
+            plt.figure(figsize=(6, 4), dpi=100)
+            
+            # Rysowanie linii
+            plt.plot(x_values, y_values, label=f"f(x) = {expression}", color="#849FF5", linewidth=2)
+            
+            # Linie pomocnicze (osie)
+            plt.axhline(0, color='gray', linewidth=0.8, linestyle='--')
+            plt.axvline(0, color='gray', linewidth=0.8, linestyle='--')
+            plt.grid(True, linestyle=':', alpha=0.6)
+            
+            # Legenda i tytuł (ustawiamy kolor od razu tutaj)
+            plt.title("Wykres funkcji", color='#C3C3C5')
+            plt.legend()
+            
+            # Stylizacja pod ciemny motyw
+            ax = plt.gca()
+            ax.set_facecolor('#28282A')
+            fig = plt.gcf()
+            fig.patch.set_facecolor('#28282A')
+            
+            # Kolory osi i etykiet
+            ax.tick_params(colors='#C3C3C5')
+            ax.yaxis.label.set_color('#C3C3C5')
+            ax.xaxis.label.set_color('#C3C3C5')
+            for spine in ax.spines.values():
+                spine.set_edgecolor('#555555')
+
+            # Bezpieczna zmiana koloru tekstu legendy
+            legend = ax.get_legend()
+            if legend:
+                for text in legend.get_texts():
+                    text.set_color("#333333")
+
+            # Zapis do pliku
+            filename = f"plot_{uuid.uuid4().hex}.png"
+            path = os.path.join(IMAGES_DIR, filename)
+            plt.savefig(path, bbox_inches='tight')
+            plt.close() # Zamknij figurę, aby zwolnić pamięć
+            
+            return path
+        except Exception as e:
+            print(f"Plot generation error: {e}")
+            # Zamknij plot w razie błędu, żeby nie wisiał w pamięci
+            try: plt.close() 
+            except: pass
+            return None
+
+    # ---- Inicjalizacja klienta ----
     def init_client(self):
         self.client = openai.OpenAI(
             api_key=self.env.str("OPENAI_API_KEY"),
@@ -305,6 +473,16 @@ class ChatLogic:
                     "Jeżeli użytkowik poprosi o rozwiązanie równania matematycznego, "
                     "zwróć JSON w formacie:\n"
                     "{\"action\": \"solve_equation\", \"action_input\": {\"equation\": \"...\"}}"
+                    "Dla próśb o pochodne zwróć JSON:\n"
+                    "{\"action\": \"differentiate\", \"action_input\": {\"expression\": \"...\", \"variable\": \"x\", \"order\": 1, \"at\": null}}. "
+                    "Dla całek zwróć JSON:\n"
+                    "{\"action\": \"integrate\", \"action_input\": {\"expression\": \"...\", \"variable\": \"x\", \"bounds\": [dolna, górna]}}. "
+                    "Jesteś zaawansowanym asystentem, który POTRAFI wykonywać obliczenia i generować wykresy. "
+                    "Masz do dyspozycji specjalne komendy w formacie JSON. "
+                    "Gdy użytkownik prosi o wykres, NIE TŁUMACZ, że nie potrafisz. Zamiast tego zwróć JSON.\n\n"
+                    "FORMATY KOMEND (używaj tylko ich do zadań specjalnych):\n"
+                    "1. OBLICZENIA (np. 2+2): {\"action\": \"evaluate_math\", \"action_input\": {\"expression\": \"...\"}}\n"
+                    "2. WYKRES (np. 'narysuj x^2'): {\"action\": \"plot_function\", \"action_input\": {\"expression\": \"...\", \"min\": -10, \"max\": 10}}\n\n"
                     "W pozostałych przypadkach odpowiadaj normalnie po polsku."
                 ),
             })
@@ -461,6 +639,35 @@ class ChatLogic:
         result_value = None
         error_value = None
         success = True
+        image_path = None
+
+        data_dict = self.data if isinstance(self.data, dict) else None
+        raw_action = data_dict.get("action") if data_dict else None
+        action_lower = raw_action.lower() if isinstance(raw_action, str) else None
+
+        if action_lower in ("evaluate_math", "evaluate"):
+            action = raw_action
+            ai = self._coerce_action_input(data_dict or {})
+            expr_value = ai.get("expression")
+            expr = "" if expr_value is None else str(expr_value)
+            msg, result_value, error_value, success = self._handle_math_action(expr)
+            message_text += msg
+        elif action_lower in ("differentiate", "derivative"):
+            action = raw_action
+            ai = self._coerce_action_input(data_dict or {})
+            expr_value = ai.get("expression")
+            expr = "" if expr_value is None else str(expr_value)
+            msg, result_value, error_value, success = self._handle_derivative_action(ai, expr)
+            message_text += msg
+        elif action_lower in ("integrate", "integral"):
+            action = raw_action
+            ai = self._coerce_action_input(data_dict or {})
+            expr_value = ai.get("expression")
+            expr = "" if expr_value is None else str(expr_value)
+            msg, result_value, error_value, success = self._handle_integral_action(ai, expr)
+            message_text += msg
+        else:
+            message_text += self._handle_default_response()
 
         if isinstance(self.data, dict) and self.data.get("action") in ("solve_equation",):
             action = "solve_equation"
@@ -491,30 +698,63 @@ class ChatLogic:
                     expr = self.data.get("expression", "")
             except Exception:
                 expr = self.data.get("expression", "")
+        # Funkcja pomocnicza: normalizuje klucze (usuwa _ i zmniejsza litery)
+        def normalize(s):
+            return str(s).lower().replace("_", "") if s else ""
 
-            message_text += f"📞 Model wykrył działanie: {expr}\n"
-            math_res = self.safe_eval_math(expr)
-            if "result" in math_res:
-                result_value = math_res["result"]
-                message_text += f"🧮 Wynik obliczenia: {expr} = {result_value}"
-            else:
-                error_value = math_res.get("error", "Nieznany błąd")
-                message_text += f"⚠️ Błąd podczas obliczania: {error_value}"
-                success = False
-        else:
+        if isinstance(self.data, dict):
+            raw_action = self.data.get("action")
+            action = normalize(raw_action)
+            
+            ai = self.data.get("action_input") or self.data.get("actioninput") or {}
+
+            # --- EVALUATE MATH ---
+            if action in ("evaluatemath", "evaluate"):
+                try:
+                    expr = ai.get("expression") if isinstance(ai, dict) else self.data.get("expression")
+                except: expr = ""
+                
+                if expr:
+                    message_text += f"📞 Model wykrył działanie: {expr}\n"
+                    math_res = self.safe_eval_math(expr)
+                    if "result" in math_res:
+                        result_value = math_res["result"]
+                        message_text += f"🧮 Wynik: {result_value}"
+                    else:
+                        error_value = math_res.get("error")
+                        message_text += f"⚠️ Błąd: {error_value}"
+                        success = False
+            
+            # --- PLOT FUNCTION ---
+            elif action == "plotfunction":
+                try:
+                    expr = ai.get("expression")
+                    x_min = float(ai.get("min", -10))
+                    x_max = float(ai.get("max", 10))
+                except:
+                    expr = "x"
+                    x_min, x_max = -10, 10
+                
+                if expr:
+                    message_text += f"📉 Generuję wykres funkcji: f(x) = {expr}"
+                    path = self._generate_plot_image(expr, x_min, x_max)
+                    if path:
+                        image_path = path
+                        message_text += "\n(Wykres wygenerowany)"
+                    else:
+                        message_text += "\n⚠️ Błąd generowania wykresu."
+                        success = False
+
+        # Fallback: Jeśli nie wykryto akcji lub wygenerowanie się nie udało, ale mamy dane
+        if not message_text and not image_path:
             if isinstance(self.content, str):
-                message_text += self.content
-            elif isinstance(self.content, (dict, list)):
-                try:
-                    message_text += json.dumps(self.content, ensure_ascii=False)
-                except Exception:
-                    message_text += str(self.content)
+                message_text = self.content
             else:
-                try:
-                    message_text += str(self.response)
-                except Exception:
-                    message_text += "(brak odpowiedzi)"
-
+                # Jeśli sparsowaliśmy dane, ale nie pasowały do żadnej akcji, wyświetl je jako JSON string
+                if self.data:
+                    message_text = json.dumps(self.data, ensure_ascii=False)
+                else:
+                    message_text = str(self.content or "(Brak treści)")
 
         raw_for_store = None
         if self.last_raw_completion is not None:
@@ -532,6 +772,7 @@ class ChatLogic:
             expression=expr,
             result=result_value,
             error=error_value,
-            success=success
+            success=success,
+            image_path=image_path
         )
         return cr
