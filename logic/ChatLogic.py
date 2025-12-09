@@ -464,28 +464,36 @@ class ChatLogic:
     def call_method(self, user_message: str):
 
         if not self._system_added:
+            system_prompt = (
+                "Jesteś inteligentnym asystentem konwersacyjnym. "
+                "Kiedy użytkownik prosi o obliczenia, równania, pochodne, całki lub wykresy, NIE odpowiadaj opisowo, "
+                "tylko zwracaj wyłącznie JSON w jednym z poniższych formatów.\n\n"
+
+                "FORMATY KOMEND SPECJALNYCH (używaj ich tylko do zadań matematycznych):\n"
+                "1. Obliczenia (np. 2+2):\n"
+                "   {\"action\": \"evaluate_math\", \"action_input\": {\"expression\": \"...\"}}\n\n"
+
+                "2. Rozwiązanie równania (np. 2x^2+3x-5=0):\n"
+                "   {\"action\": \"solve_equation\", \"action_input\": {\"equation\": \"...\"}}\n\n"
+
+                "3. Pochodna (z opcjonalnym obliczeniem w punkcie):\n"
+                "   {\"action\": \"differentiate\", \"action_input\": {"
+                "\"expression\": \"...\", \"variable\": \"x\", \"order\": 1, \"at\": null}}\n\n"
+
+                "4. Całka (nieoznaczona lub oznaczona):\n"
+                "   {\"action\": \"integrate\", \"action_input\": {"
+                "\"expression\": \"...\", \"variable\": \"x\", \"bounds\": [dolna, górna]}}\n\n"
+
+                "5. Wykres funkcji (np. 'narysuj x^2'):\n"
+                "   {\"action\": \"plot_function\", \"action_input\": {"
+                "\"expression\": \"...\", \"min\": -10, \"max\": 10}}\n\n"
+
+                "Jeśli pytanie użytkownika NIE wymaga powyższych działań, odpowiadaj normalnie po polsku, bez JSON."
+            )
+
             self.history.append({
                 "role": "system",
-                "content": (
-                    "Jesteś inteligentnym asystentem konwersacyjnym. "
-                    "Jeśli użytkownik poprosi o wykonanie obliczeń matematycznych, "
-                    "nie odpowiadaj tekstowo, tylko zwróć JSON w formacie:\n"
-                    "{\"action\": \"evaluate_math\", \"action_input\": {\"expression\": \"...\"}}. "
-                    "Jeżeli użytkowik poprosi o rozwiązanie równania matematycznego, "
-                    "zwróć JSON w formacie:\n"
-                    "{\"action\": \"solve_equation\", \"action_input\": {\"equation\": \"...\"}}"
-                    "Dla próśb o pochodne zwróć JSON:\n"
-                    "{\"action\": \"differentiate\", \"action_input\": {\"expression\": \"...\", \"variable\": \"x\", \"order\": 1, \"at\": null}}. "
-                    "Dla całek zwróć JSON:\n"
-                    "{\"action\": \"integrate\", \"action_input\": {\"expression\": \"...\", \"variable\": \"x\", \"bounds\": [dolna, górna]}}. "
-                    "Jesteś zaawansowanym asystentem, który POTRAFI wykonywać obliczenia i generować wykresy. "
-                    "Masz do dyspozycji specjalne komendy w formacie JSON. "
-                    "Gdy użytkownik prosi o wykres, NIE TŁUMACZ, że nie potrafisz. Zamiast tego zwróć JSON.\n\n"
-                    "FORMATY KOMEND (używaj tylko ich do zadań specjalnych):\n"
-                    "1. OBLICZENIA (np. 2+2): {\"action\": \"evaluate_math\", \"action_input\": {\"expression\": \"...\"}}\n"
-                    "2. WYKRES (np. 'narysuj x^2'): {\"action\": \"plot_function\", \"action_input\": {\"expression\": \"...\", \"min\": -10, \"max\": 10}}\n\n"
-                    "W pozostałych przypadkach odpowiadaj normalnie po polsku."
-                ),
+                "content": system_prompt,
             })
             self._system_added = True
 
@@ -750,4 +758,3 @@ class ChatLogic:
             image_path=image_path
         )
         return cr
-
