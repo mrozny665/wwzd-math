@@ -1,4 +1,6 @@
 # ChatLogic.py
+import cmath
+
 import openai
 from environs import Env
 import json
@@ -160,6 +162,149 @@ class ChatLogic:
         except Exception as e:
             return {"error": str(e)}
 
+    def _ast_to_poly(self, node, var_name='x'):
+        """
+        Zamienia AST wyrażenia na słownik stopień->współczynnik.
+        Obsługuje: Constant, Name (zmienna), BinOp (+,-,*,/,Pow), UnaryOp.
+        Dzielnie przez stałą jest dozwolone; dzielenie przez wyrażenie z zmienną nie jest wspierane.
+        """
+        if isinstance(node, ast.Expression):
+            return self._ast_to_poly(node.body, var_name)
+        if isinstance(node, ast.Constant):
+            return {0: float(node.value)}
+        if isinstance(node, ast.Num):  # compat
+            return {0: float(node.n)}
+        if isinstance(node, ast.Name):
+            if node.id == var_name:
+                return {1: 1.0}
+            raise ValueError(f"Nieznana nazwa: {node.id}")
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            p = self._ast_to_poly(node.operand, var_name)
+            return {k: -v for k, v in p.items()}
+        if isinstance(node, ast.BinOp):
+            left = self._ast_to_poly(node.left, var_name)
+            right = self._ast_to_poly(node.right, var_name)
+            if isinstance(node.op, ast.Add):
+                res = left.copy()
+                for k, v in right.items():
+                    res[k] = res.get(k, 0.0) + v
+                return res
+            if isinstance(node.op, ast.Sub):
+                res = left.copy()
+                for k, v in right.items():
+                    res[k] = res.get(k, 0.0) - v
+                return res
+            if isinstance(node.op, ast.Mult):
+                res = {}
+                for a, va in left.items():
+                    for b, vb in right.items():
+                        deg = a + b
+                        res[deg] = res.get(deg, 0.0) + va * vb
+                return res
+            if isinstance(node.op, ast.Div):
+                # pozwalamy dzielenie tylko przez stałą
+                if len(right) == 1 and 0 in right and right[0] != 0:
+                    denom = right[0]
+                    return {k: v / denom for k, v in left.items()}
+                raise ValueError("Dzielenie przez wyrażenie z zmienną nieobsługiwane")
+            if isinstance(node.op, ast.Pow):
+                # obsługa potęgi zmiennej do stałej małej (np. x**2)
+                if len(right) == 1 and 0 in right:
+                    exp = int(right[0])
+                    if exp < 0 or exp > 2:
+                        raise ValueError("Tylko potęgi 0..2 obsługiwane")
+                    # potęgowanie wielomianu (tylko małe exp)
+                    res = {0: 1.0}
+                    for _ in range(exp):
+                        new = {}
+                        for a, va in res.items():
+                            for b, vb in left.items():
+                                deg = a + b
+                                new[deg] = new.get(deg, 0.0) + va * vb
+                        res = new
+                    return res
+                raise ValueError("Nieobsługiwana potęga")
+        raise ValueError(f"Nieobsługiwany węzeł AST: {type(node).__name__}")
+
+    def solve_equation(self, equation: str, var_name: str = 'x'):
+        """
+        Rozwiązuje równanie '... = ...' dla jednej zmiennej.
+        Normalizuje: ^ -> **,  liczba*zmienna (np. 10x -> 10\*x), liczba*nawias (np. 2(x+1) -> 2\*(x+1)).
+        Obsługa: stopień do 2; dla Δ>=0 zwraca float, dla Δ<0 zwraca liczby zespolone.
+        """
+        try:
+            if "=" not in equation:
+                return {"success": False, "error": "Brak znaku '=' w równaniu"}
+
+            # Normalizacja operatorów
+            eq = equation.replace("^", "**")
+
+            # Wstaw '*' między liczbą a zmienną, np. 10x -> 10*x
+            eq = re.sub(r'(\d)(\s*)' + re.escape(var_name) + r'\b', r'\1*\2' + var_name, eq)
+            # Wstaw '*' między liczbą a nawiasem, np. 2(x+1) -> 2*(x+1)
+            eq = re.sub(r'(\d)\s*\(', r'\1*(', eq)
+
+            left_s, right_s = eq.split("=", 1)
+
+            left_ast = ast.parse(left_s, mode="eval")
+            right_ast = ast.parse(right_s, mode="eval")
+
+            left_poly = self._ast_to_poly(left_ast, var_name)
+            right_poly = self._ast_to_poly(right_ast, var_name)
+
+            # left - right
+            res = {}
+            for k, v in left_poly.items():
+                res[k] = res.get(k, 0.0) + v
+            for k, v in right_poly.items():
+                res[k] = res.get(k, 0.0) - v
+
+            # usuń małe zera
+            res = {k: (0.0 if abs(v) < 1e-12 else v) for k, v in res.items()}
+
+            if not res:
+                return {"success": True, "solution": "Tożsamość (wszystkie x)"}
+
+            max_deg = max(res.keys())
+            if max_deg == 0:
+                if abs(res.get(0, 0.0)) < 1e-12:
+                    return {"success": True, "solution": "Tożsamość (wszystkie x)"}
+                return {"success": False, "error": "Sprzeczne równanie (brak rozwiązań)"}
+
+            if max_deg == 1:
+                a = res.get(1, 0.0)
+                b = res.get(0, 0.0)
+                if abs(a) < 1e-12:
+                    return {"success": False, "error": "Brak składnika przy zmiennej"}
+                return {"success": True, "solution": -b / a}
+
+            if max_deg == 2:
+                a = res.get(2, 0.0)
+                b = res.get(1, 0.0)
+                c = res.get(0, 0.0)
+                if abs(a) < 1e-12:
+                    if abs(b) < 1e-12:
+                        return {"success": False, "error": "Niewystarczające współczynniki"}
+                    return {"success": True, "solution": -c / b}
+
+                disc = b * b - 4 * a * c
+                if disc > 0:
+                    sqrt_disc = math.sqrt(disc)
+                    x1 = (-b + sqrt_disc) / (2 * a)
+                    x2 = (-b - sqrt_disc) / (2 * a)
+                    return {"success": True, "solution": [x1, x2]}
+                elif abs(disc) < 1e-15:
+                    x = (-b) / (2 * a)
+                    return {"success": True, "solution": x}
+                else:
+                    sqrt_disc = cmath.sqrt(disc)
+                    x1 = (-b + sqrt_disc) / (2 * a)
+                    x2 = (-b - sqrt_disc) / (2 * a)
+                    return {"success": True, "solution": [x1, x2]}
+
+            return {"success": False, "error": f"Stopień {max_deg} nieobsługiwany"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
     def _coerce_action_input(self, container: Any) -> dict:
         """Zwraca dict z action_input lub fallbackiem na klucz expression."""
         if not isinstance(container, dict):
@@ -325,6 +470,9 @@ class ChatLogic:
                     "Jeśli użytkownik poprosi o wykonanie obliczeń matematycznych, "
                     "nie odpowiadaj tekstowo, tylko zwróć JSON w formacie:\n"
                     "{\"action\": \"evaluate_math\", \"action_input\": {\"expression\": \"...\"}}. "
+                    "Jeżeli użytkowik poprosi o rozwiązanie równania matematycznego, "
+                    "zwróć JSON w formacie:\n"
+                    "{\"action\": \"solve_equation\", \"action_input\": {\"equation\": \"...\"}}"
                     "Dla próśb o pochodne zwróć JSON:\n"
                     "{\"action\": \"differentiate\", \"action_input\": {\"expression\": \"...\", \"variable\": \"x\", \"order\": 1, \"at\": null}}. "
                     "Dla całek zwróć JSON:\n"
@@ -521,6 +669,35 @@ class ChatLogic:
         else:
             message_text += self._handle_default_response()
 
+        if isinstance(self.data, dict) and self.data.get("action") in ("solve_equation",):
+            action = "solve_equation"
+            expr = ""
+            ai = self.data.get("action_input") or {}
+            if isinstance(ai, dict):
+                expr = ai.get("equation", "") or ai.get("expression", "")
+            else:
+                expr = self.data.get("equation", "") or self.data.get("expression", "")
+            message_text += f"📞 Model przesłał równanie: {expr}\n"
+            sol = self.solve_equation(expr, var_name='x')
+            if sol.get("success"):
+                sval = sol.get("solution")
+                message_text += f"🔎 Rozwiązanie: {sval}"
+            else:
+                message_text += f"⚠️ Błąd rozwiązania: {sol.get('error')}"
+            success = sol.get("success", False)
+            action = "solve_equation"
+            expr = expr
+        elif isinstance(self.data, dict) and self.data.get("action") in ("evaluate_math", "evaluate"):
+            action = self.data.get("action")
+            expr = None
+            try:
+                ai = self.data.get("action_input") or self.data.get("action_input", {})
+                if isinstance(ai, dict):
+                    expr = ai.get("expression", "")
+                else:
+                    expr = self.data.get("expression", "")
+            except Exception:
+                expr = self.data.get("expression", "")
         # Funkcja pomocnicza: normalizuje klucze (usuwa _ i zmniejsza litery)
         def normalize(s):
             return str(s).lower().replace("_", "") if s else ""
