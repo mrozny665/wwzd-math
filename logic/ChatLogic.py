@@ -55,6 +55,23 @@ class ChatLogic:
         self._system_added = False
         self.calculus_engine = CalculusEngine()
 
+    def _normalize_expression(self, expr: str, var_name: str = "x") -> str:
+        """Normalizuje proste wyrażenia użytkownika.
+
+        - zamienia ^ na ** (użytkownicy często używają potęgowania ^)
+        - wstawia * pomiędzy liczbą a zmienną, np. 2x -> 2*x
+        - wstawia * pomiędzy liczbą a nawiasem, np. 3(x+1) -> 3*(x+1)
+        """
+        if not isinstance(expr, str):
+            return expr
+        # potęgowanie
+        s = expr.replace("^", "**")
+        # liczba bezpośrednio przed zmienną, np. 2x -> 2*x
+        s = re.sub(rf"(\d)(\s*){re.escape(var_name)}\b", rf"\1*\2{var_name}", s)
+        # liczba bezpośrednio przed nawiasem, np. 3(x+1) -> 3*(x+1)
+        s = re.sub(r"(\d)\s*\(", r"\1*(", s)
+        return s
+
     def read_env(self):
         self.env = Env()
         self.env.read_env()
@@ -152,10 +169,8 @@ class ChatLogic:
 
     def safe_eval_math(self, expression: str, variables=None):
         try:
-            # drobne sanity: zamień ^ na ** (użytkownicy mogą użyć ^)
-            expr = expression.replace("^", "**")
-            # usuń niebezpieczne znaki (tylko jako prosty filter — dalej AST zadba o bezpieczeństwo)
-            # parsuj AST i ewaluuj
+            # normalizacja (potęgowanie, brakujący operator mnożenia)
+            expr = self._normalize_expression(expression)
             parsed = ast.parse(expr, mode="eval")
             val = self._eval_ast(parsed, variables)
             return {"result": val}
@@ -229,20 +244,15 @@ class ChatLogic:
     def solve_equation(self, equation: str, var_name: str = 'x'):
         """
         Rozwiązuje równanie '... = ...' dla jednej zmiennej.
-        Normalizuje: ^ -> **,  liczba*zmienna (np. 10x -> 10\*x), liczba*nawias (np. 2(x+1) -> 2\*(x+1)).
+        Normalizuje: ^ -> **,  liczba*zmienna (np. 10x -> 10*x), liczba*nawias (np. 2(x+1) -> 2*(x+1)).
         Obsługa: stopień do 2; dla Δ>=0 zwraca float, dla Δ<0 zwraca liczby zespolone.
         """
         try:
             if "=" not in equation:
                 return {"success": False, "error": "Brak znaku '=' w równaniu"}
 
-            # Normalizacja operatorów
-            eq = equation.replace("^", "**")
-
-            # Wstaw '*' między liczbą a zmienną, np. 10x -> 10*x
-            eq = re.sub(r'(\d)(\s*)' + re.escape(var_name) + r'\b', r'\1*\2' + var_name, eq)
-            # Wstaw '*' między liczbą a nawiasem, np. 2(x+1) -> 2*(x+1)
-            eq = re.sub(r'(\d)\s*\(', r'\1*(', eq)
+            # Normalizacja operatorów i brakujących mnożeń
+            eq = self._normalize_expression(equation, var_name=var_name)
 
             left_s, right_s = eq.split("=", 1)
 
@@ -339,6 +349,11 @@ class ChatLogic:
         return message, None, error_value, False
 
     def _handle_derivative_action(self, payload: dict, expr: str):
+        # znormalizuj expression w payloadzie (np. 2x -> 2*x)
+        if isinstance(payload, dict) and payload.get("expression"):
+            payload = dict(payload)
+            payload["expression"] = self._normalize_expression(str(payload["expression"]))
+            expr = payload["expression"]
         expr_display = "" if expr is None else str(expr)
         message = f"📞 Model poprosił o pochodną: {expr_display}\n"
         diff_res = self.calculus_engine.differentiate(payload)
@@ -355,6 +370,11 @@ class ChatLogic:
         return message, diff_res, None, True
 
     def _handle_integral_action(self, payload: dict, expr: str):
+        # znormalizuj expression w payloadzie (np. 2x -> 2*x)
+        if isinstance(payload, dict) and payload.get("expression"):
+            payload = dict(payload)
+            payload["expression"] = self._normalize_expression(str(payload["expression"]))
+            expr = payload["expression"]
         expr_display = "" if expr is None else str(expr)
         message = f"📞 Model poprosił o całkę: {expr_display}\n"
         integral_res = self.calculus_engine.integrate(payload)
@@ -398,7 +418,8 @@ class ChatLogic:
         try:
             x_values = np.linspace(x_min, x_max, 200)
             y_values = []
-            expr_clean = expression.replace("^", "**")
+            # normalizacja wyrażenia (np. 2x -> 2*x, ^ -> **)
+            expr_clean = self._normalize_expression(expression)
             parsed = ast.parse(expr_clean, mode="eval")
 
             for x in x_values:
