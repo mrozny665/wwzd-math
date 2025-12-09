@@ -315,9 +315,10 @@ class ChatLogic:
         if isinstance(ai, (str, int, float)):
             return {"expression": str(ai)}
         fallback_keys = (
-            "expression", "expr", "variable", "var", "order", "nth",
+            "expression", "expr", "equation",
+            "variable", "var", "order", "nth",
             "at", "point", "value", "evaluate_at", "bounds", "limits",
-            "lower", "upper", "from", "to", "a", "b"
+            "lower", "upper", "from", "to", "a", "b", "min", "max"
         )
         fallback = {}
         for key in fallback_keys:
@@ -626,13 +627,7 @@ class ChatLogic:
 
     # ---- obsługa i logika odpowiedzi ----
     def handle_response(self) -> ChatResult:
-        """
-        Zwraca obiekt ChatResult, zawierający:
-          - message: tekst który ma się pokazać użytkownikowi
-          - raw_json: preferencyjnie parsowany JSON (self.data) lub pełny surowy obiekt (self.last_raw_completion)
-          - content: surowy content (tekst)
-          - plus pola action/expression/result/error
-        """
+        """Centralna obsługa odpowiedzi i komend JSON od modelu."""
         message_text = ""
         action = None
         expr = None
@@ -642,102 +637,84 @@ class ChatLogic:
         image_path = None
 
         data_dict = self.data if isinstance(self.data, dict) else None
-        raw_action = data_dict.get("action") if data_dict else None
-        action_lower = raw_action.lower() if isinstance(raw_action, str) else None
 
-        if action_lower in ("evaluate_math", "evaluate"):
+        # Dispatcher akcji JSON
+        if data_dict and isinstance(data_dict.get("action"), str):
+            raw_action = data_dict.get("action")
+            # normalizacja tylko na potrzeby porównań
+            normalized_action = raw_action.lower().replace("_", "")
+            ai = self._coerce_action_input(data_dict)
             action = raw_action
-            ai = self._coerce_action_input(data_dict or {})
-            expr_value = ai.get("expression")
-            expr = "" if expr_value is None else str(expr_value)
-            msg, result_value, error_value, success = self._handle_math_action(expr)
-            message_text += msg
-        elif action_lower in ("differentiate", "derivative"):
-            action = raw_action
-            ai = self._coerce_action_input(data_dict or {})
-            expr_value = ai.get("expression")
-            expr = "" if expr_value is None else str(expr_value)
-            msg, result_value, error_value, success = self._handle_derivative_action(ai, expr)
-            message_text += msg
-        elif action_lower in ("integrate", "integral"):
-            action = raw_action
-            ai = self._coerce_action_input(data_dict or {})
-            expr_value = ai.get("expression")
-            expr = "" if expr_value is None else str(expr_value)
-            msg, result_value, error_value, success = self._handle_integral_action(ai, expr)
-            message_text += msg
-        else:
-            message_text += self._handle_default_response()
 
-        if isinstance(self.data, dict) and self.data.get("action") in ("solve_equation",):
-            action = "solve_equation"
-            expr = ""
-            ai = self.data.get("action_input") or {}
-            if isinstance(ai, dict):
-                expr = ai.get("equation", "") or ai.get("expression", "")
-            else:
-                expr = self.data.get("equation", "") or self.data.get("expression", "")
-            message_text += f"📞 Model przesłał równanie: {expr}\n"
-            sol = self.solve_equation(expr, var_name='x')
-            if sol.get("success"):
-                sval = sol.get("solution")
-                message_text += f"🔎 Rozwiązanie: {sval}"
-            else:
-                message_text += f"⚠️ Błąd rozwiązania: {sol.get('error')}"
-            success = sol.get("success", False)
-            action = "solve_equation"
-            expr = expr
-        elif isinstance(self.data, dict) and self.data.get("action") in ("evaluate_math", "evaluate"):
-            action = self.data.get("action")
+            # Wyciągnięcie podstawowych pól
             expr = None
-            try:
-                ai = self.data.get("action_input") or self.data.get("action_input", {})
+            if isinstance(ai, dict):
+                expr = ai.get("expression") or ai.get("equation")
+
+            # --- OBLICZENIA ---
+            if normalized_action in ("evaluatemath", "evaluate"):
+                expr_str = "" if expr is None else str(expr)
+                msg, result_value, error_value, success = self._handle_math_action(expr_str)
+                expr = expr_str
+                message_text += msg
+
+            # --- POCHODNA ---
+            elif normalized_action in ("differentiate", "derivative"):
+                expr_str = "" if expr is None else str(expr)
+                msg, result_value, error_value, success = self._handle_derivative_action(ai, expr_str)
+                expr = expr_str
+                message_text += msg
+
+            # --- CAŁKA ---
+            elif normalized_action in ("integrate", "integral"):
+                expr_str = "" if expr is None else str(expr)
+                msg, result_value, error_value, success = self._handle_integral_action(ai, expr_str)
+                expr = expr_str
+                message_text += msg
+
+            # --- RÓWNANIE ---
+            elif normalized_action == "solveequation":
+                equation = None
                 if isinstance(ai, dict):
-                    expr = ai.get("expression", "")
+                    equation = ai.get("equation") or ai.get("expression")
+                if equation is None:
+                    equation = data_dict.get("equation") or data_dict.get("expression") or ""
+                equation_str = str(equation)
+                expr = equation_str
+                message_text += f"📞 Model przesłał równanie: {equation_str}\n"
+                sol = self.solve_equation(equation_str, var_name="x")
+                if sol.get("success"):
+                    sval = sol.get("solution")
+                    result_value = sval
+                    message_text += f"🔎 Rozwiązanie: {sval}"
                 else:
-                    expr = self.data.get("expression", "")
-            except Exception:
-                expr = self.data.get("expression", "")
-        # Funkcja pomocnicza: normalizuje klucze (usuwa _ i zmniejsza litery)
-        def normalize(s):
-            return str(s).lower().replace("_", "") if s else ""
+                    error_value = sol.get("error")
+                    message_text += f"⚠️ Błąd rozwiązania: {error_value}"
+                success = sol.get("success", False)
 
-        if isinstance(self.data, dict):
-            raw_action = self.data.get("action")
-            action = normalize(raw_action)
-            
-            ai = self.data.get("action_input") or self.data.get("actioninput") or {}
+            # --- WYKRES FUNKCJI ---
+            elif normalized_action == "plotfunction":
+                # parametry zakresu X
+                x_min = -10.0
+                x_max = 10.0
+                if isinstance(ai, dict):
+                    expr = ai.get("expression", expr)
+                    try:
+                        if "min" in ai:
+                            x_min = float(ai.get("min"))
+                        if "max" in ai:
+                            x_max = float(ai.get("max"))
+                    except Exception:
+                        x_min, x_max = -10.0, 10.0
 
-            # --- EVALUATE MATH ---
-            if action in ("evaluatemath", "evaluate"):
-                try:
-                    expr = ai.get("expression") if isinstance(ai, dict) else self.data.get("expression")
-                except: expr = ""
-                
+                if expr is None:
+                    expr = data_dict.get("expression", "x")
+
                 if expr:
-                    message_text += f"📞 Model wykrył działanie: {expr}\n"
-                    math_res = self.safe_eval_math(expr)
-                    if "result" in math_res:
-                        result_value = math_res["result"]
-                        message_text += f"🧮 Wynik: {result_value}"
-                    else:
-                        error_value = math_res.get("error")
-                        message_text += f"⚠️ Błąd: {error_value}"
-                        success = False
-            
-            # --- PLOT FUNCTION ---
-            elif action == "plotfunction":
-                try:
-                    expr = ai.get("expression")
-                    x_min = float(ai.get("min", -10))
-                    x_max = float(ai.get("max", 10))
-                except:
-                    expr = "x"
-                    x_min, x_max = -10, 10
-                
-                if expr:
-                    message_text += f"📉 Generuję wykres funkcji: f(x) = {expr}"
-                    path = self._generate_plot_image(expr, x_min, x_max)
+                    expr_str = str(expr)
+                    expr = expr_str
+                    message_text += f"📉 Generuję wykres funkcji: f(x) = {expr_str}"
+                    path = self._generate_plot_image(expr_str, x_min, x_max)
                     if path:
                         image_path = path
                         message_text += "\n(Wykres wygenerowany)"
@@ -745,16 +722,13 @@ class ChatLogic:
                         message_text += "\n⚠️ Błąd generowania wykresu."
                         success = False
 
-        # Fallback: Jeśli nie wykryto akcji lub wygenerowanie się nie udało, ale mamy dane
-        if not message_text and not image_path:
-            if isinstance(self.content, str):
-                message_text = self.content
-            else:
-                # Jeśli sparsowaliśmy dane, ale nie pasowały do żadnej akcji, wyświetl je jako JSON string
-                if self.data:
-                    message_text = json.dumps(self.data, ensure_ascii=False)
-                else:
-                    message_text = str(self.content or "(Brak treści)")
+            # Jeśli akcja była rozpoznana, ale nie ustawiono wiadomości (edge case)
+            if not message_text and action is not None:
+                message_text = self._handle_default_response()
+
+        else:
+            # Brak akcji JSON – zwykła odpowiedź tekstowa
+            message_text = self._handle_default_response()
 
         raw_for_store = None
         if self.last_raw_completion is not None:
@@ -776,3 +750,4 @@ class ChatLogic:
             image_path=image_path
         )
         return cr
+
