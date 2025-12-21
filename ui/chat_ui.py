@@ -10,7 +10,7 @@ from typing import Any
 from PIL import Image, ImageTk  # WAŻNE: Wymaga pip install pillow
 
 from ui.chat_store import ChatStore
-from logic.ChatLogic import ChatLogic
+from logic.chat_logic import ChatLogic
 
 BG_MAIN = "#28282A"
 CARD_BG = "#3D3D40"

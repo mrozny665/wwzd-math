@@ -2,7 +2,7 @@
 import tkinter as tk
 from ui.chat_store import ChatStore
 from ui.chat_ui import ChatUI
-from logic.ChatLogic import ChatLogic
+from logic.chat_logic import ChatLogic
 
 def main():
     # inicjalizacja logiki (jeżeli wymaga read_env / init_client)
