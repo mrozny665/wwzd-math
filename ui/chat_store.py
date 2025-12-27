@@ -283,20 +283,19 @@ class ChatStore:
     # ----------------------
     # Główna metoda do dopisywania wiadomości
     # ----------------------
-    def append_message(self, role: str, text: str, outgoing: bool, extra: Optional[dict] = None) -> dict:
-        """
-        Dopisuje wiadomość do pliku i zwraca zapisany rekord.
-        Każda wartość jest przetwarzana tak, by była JSON-serializowalna.
-        """
+    def append_message(self, role: str, text: str, outgoing: bool = False, extra: Optional[dict] = None, thought: Optional[str] = None) -> dict:
+        # Tworzymy podstawowy rekord wiadomości
         rec = {
             "id": str(uuid.uuid4()),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "role": role,
             "outgoing": bool(outgoing),
             "text": text,
+            "thought": thought, # Nowe pole: przechowuje proces myślowy lub statusy pośrednie
         }
 
         if extra is not None:
+            # Normalizacja i zabezpieczenie danych JSON przed zapisem
             try:
                 norm = self._normalize_extra(extra)
                 rec["extra"] = self._make_json_safe(norm)
@@ -304,16 +303,15 @@ class ChatStore:
                 rec["extra"] = self._make_json_safe(extra)
 
         with self._lock:
+            # Zapis do pliku z użyciem blokady (lock)
             try:
                 with open(self.path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    if not isinstance(data, list):
-                        data = []
             except (FileNotFoundError, json.JSONDecodeError):
                 data = []
 
             data.append(rec)
-
+            # Bezpieczny zapis do pliku tymczasowego
             tmp_path = self.path + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -321,6 +319,37 @@ class ChatStore:
 
         return rec
 
+    def update_message(self, message_id: str, text: Optional[str] = None, thought: Optional[str] = None,
+                       extra: Optional[dict] = None):
+        """Aktualizuje istniejącą wiadomość o podanym ID."""
+        with self._lock:
+            try:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                return None
+
+            found = False
+            for rec in data:
+                if rec.get("id") == message_id:
+                    if text is not None: rec["text"] = text
+                    if thought is not None: rec["thought"] = thought
+                    if extra is not None:
+                        # Łączymy stare extra z nowym
+                        existing_extra = rec.get("extra", {})
+                        norm_new = self._normalize_extra(extra)
+                        existing_extra.update(self._make_json_safe(norm_new))
+                        rec["extra"] = existing_extra
+                    found = True
+                    break
+
+            if found:
+                tmp_path = self.path + ".tmp"
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, self.path)
+
+            return found
     # ----------------------
     # Wczytywanie
     # ----------------------

@@ -1,17 +1,14 @@
-# ui/chat_ui.py
-import threading
-import tkinter as tk
-from tkinter import ttk, font
+import time
 from datetime import datetime
+import flet as ft
+import threading
 import json
-import re
 import os
-from typing import Any
-from PIL import Image, ImageTk  # WAŻNE: Wymaga pip install pillow
-
+# Importy Twoich klas
 from ui.chat_store import ChatStore
 from logic.chat_logic import ChatLogic
 
+# Stałe kolorystyczne
 BG_MAIN = "#28282A"
 CARD_BG = "#3D3D40"
 TEXT_COLOR = "#C3C3C5"
@@ -19,449 +16,342 @@ TEXT_COLOR_FADED = "#9C9C9F"
 BG_HIDDEN_PANEL = "#222224"
 ACCENT = "#849FF5"
 
-WINDOW_W = 1280
-WINDOW_H = 720
-MIN_BUBBLE = 200
-BUBBLE_RATIO = 0.6
 
 class ChatUI:
-    def __init__(self, root: tk.Tk, chat_logic: ChatLogic, store: ChatStore):
-        self.root = root
+    def __init__(self, page: ft.Page, chat_logic: ChatLogic, store: ChatStore):
+        self.page = page
         self.chat_logic = chat_logic
         self.store = store
-        self._message_widgets = []
-        
-        # LISTA DO PRZECHOWYWANIA REFERENCJI OBRAZKÓW
-        # Bez tego Python usuwa obrazki z pamięci (Garbage Collector) i znikają z ekranu
-        self._image_refs = [] 
-        
-        self._setup_root()
-        self._create_fonts()
-        self._create_layout()
-        self._create_header()
-        self._create_messages_area()
-        self._create_send_bar()
+
+        # Konfiguracja strony
+        self.page.bgcolor = BG_MAIN
+        self.page.theme_mode = ft.ThemeMode.DARK
+        self.page.padding = 0
+
+        # Kontener na wiadomości
+        self.chat_view = ft.ListView(
+            expand=True,
+            spacing=15,
+            padding=20,
+            auto_scroll=True
+        )
+
+        # Pole tekstowe
+        self.input_field = ft.TextField(
+            hint_text="Napisz wiadomość...",
+            fill_color=CARD_BG,
+            color="white",
+            border_radius=15,
+            border_color=ft.Colors.TRANSPARENT,
+            expand=True,
+            multiline=True,
+            min_lines=1,
+            max_lines=5,
+            on_submit=lambda _: self._on_send(),
+        )
+
+        self._build_layout()
         self.refresh_from_store()
 
-    def _render_markdown_to_text(self, text_widget: tk.Text, md: str, max_height=30):
-        """
-        Prosty renderer Markdown -> Text. Na końcu ustawia widget na disabled
-        i dopasowuje height do liczby linii (maksymalnie max_height).
-        Zwraca ustawioną wysokość (int).
-        """
-        import re
+    def _build_layout(self):
+        # Nagłówek
+        header = ft.Container(
+            content=ft.Text("ROZMOWA", size=24, weight="bold", color="white"),
+            padding=ft.padding.only(left=25, top=15, bottom=15),
+            bgcolor=BG_MAIN,
+        )
 
-        text_widget.configure(state="normal")
-        text_widget.delete("1.0", "end")
+        # Pasek wysyłania
+        send_bar = ft.Container(
+            content=ft.Row([
+                self.input_field,
+                ft.IconButton(
+                    icon=ft.Icons.SEND_ROUNDED,
+                    icon_color=ACCENT,
+                    icon_size=30,
+                    on_click=lambda _: self._on_send()
+                )
+            ], tight=True),
+            padding=20,
+        )
 
-        # wydziel bloki kodu
-        code_blocks = []
+        # Dodanie wszystkiego do strony
+        self.page.add(
+            header,
+            ft.Divider(height=1, color=CARD_BG),
+            self.chat_view,
+            send_bar
+        )
 
-        def _replace_code_block(match):
-            code = match.group(1)
-            placeholder = f"@@CODEBLOCK{len(code_blocks)}@@"
-            code_blocks.append(code)
-            return placeholder
+    def _create_thought_block(self, thought_text: str):
+        if not thought_text:
+            return ft.Container()
 
-        md2 = re.sub(r"```(?:\w*\n)?(.*?)```", _replace_code_block, md, flags=re.S)
+        return ft.Container(
+            content=ft.Column([
+                ft.Row([
+                    ft.Icon(ft.Icons.AUTO_AWESOME, size=15, color=ACCENT),
+                    ft.Text("Działania:", size=11, weight=ft.FontWeight.BOLD, color=ACCENT),
+                ]),
+                ft.Text(thought_text, size=11, italic=True, color=TEXT_COLOR_FADED),
+            ], spacing=5),
+            bgcolor=ft.Colors.with_opacity(0.05, ACCENT),
+            padding=12,
+            border_radius=10,
+            border=ft.border.all(1, ft.Colors.with_opacity(0.1, ACCENT)),
+            margin=ft.margin.only(bottom=10)
+        )
 
-        # linie i nagłówki
-        for line in md2.splitlines():
-            header = re.match(r"^(#{1,6})\s+(.*)$", line)
-            if header:
-                text_widget.insert("end", header.group(2) + "\n")
-                tag = f"h{len(header.group(1))}"
-                # tagowanie później (nie potrzebujemy dokładnych indeksów tu)
-                text_widget.tag_add(tag, "end-2l linestart", "end-1l lineend")
-                continue
-            text_widget.insert("end", line + "\n")
+    def _create_bubble(self, role, text, extra, full_rec):
+        is_user = role == "user"
 
-        # przygotuj dalej na inline-formaty
-        content = text_widget.get("1.0", "end-1c")
-        text_widget.delete("1.0", "end")
+        # Pobieranie pola 'thought' bezpośrednio z rekordu (zgodnie z nowym ChatStore)
+        thought_data = full_rec.get("thought")
 
-        # inline code
-        content = re.sub(r"`([^`]+)`", lambda m: f"@@INLINECODE{m.group(1)}@@", content)
-        # bold
-        content = re.sub(r"\*\*(.+?)\*\*", lambda m: f"@@BOLD{m.group(1)}@@", content)
-        # italic
-        content = re.sub(r"(?<!@)\*(.+?)\*(?!@)|(?<!@)_(.+?)_(?!@)",
-                         lambda m: f"@@ITALIC{(m.group(1) or m.group(2))}@@", content)
-        # links -> "label (url)" (proste)
-        content = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", content)
+        # 1. Pobieranie surowych danych z JSONa do statystyk
+        raw_data = extra.get("raw_json", {})
 
-        # przywróć bloki kodu
-        for i, code in enumerate(code_blocks):
-            content = content.replace(f"@@CODEBLOCK{i}@@", f"\n@@CODEBLOCK_RAW_{i}@@\n")
+        # WYCIĄGANIE WYJAŚNIENIA (Reasoning) z JSONa (jako backup dla starszych logów)
+        choices = raw_data.get("choices", [{}])
+        first_choice = choices[0] if choices else {}
+        msg_obj = first_choice.get("message", {})
+        explanation = msg_obj.get("reasoning") or thought_data or "Brak dodatkowego wyjaśnienia"
 
-        # wstaw i taguj
-        for part in re.split(r"(@@.+?@@)", content):
-            if not part:
-                continue
-            if part.startswith("@@BOLD") and part.endswith("@@"):
-                inner = part[len("@@BOLD"):-2]
-                start = text_widget.index("end-1c")
-                text_widget.insert("end", inner)
-                end = text_widget.index("end-1c")
-                text_widget.tag_add("bold", start, end)
-            elif part.startswith("@@ITALIC") and part.endswith("@@"):
-                inner = part[len("@@ITALIC"):-2]
-                start = text_widget.index("end-1c")
-                text_widget.insert("end", inner)
-                end = text_widget.index("end-1c")
-                text_widget.tag_add("italic", start, end)
-            elif part.startswith("@@INLINECODE") and part.endswith("@@"):
-                inner = part[len("@@INLINECODE"):-2]
-                start = text_widget.index("end-1c")
-                text_widget.insert("end", inner)
-                end = text_widget.index("end-1c")
-                text_widget.tag_add("inlinecode", start, end)
-                text_widget.insert("end", part[len("@@INLINECODE"):-2], "inlinecode")
-            elif part.startswith("@@CODEBLOCK_RAW_") and part.endswith("@@"):
-                idx = int(part[len("@@CODEBLOCK_RAW_"):-2])
-                code = code_blocks[idx]
-                text_widget.insert("end", "\n")
-                start = text_widget.index("end-1c")
-                text_widget.insert("end", code.rstrip("\n") + "\n")
-                end = text_widget.index("end-1c")
-                text_widget.tag_add("codeblock", start, end)
-            else:
-                text_widget.insert("end", part)
+        # STATYSTYKI TOKENÓW
+        usage = raw_data.get("usage", {})
+        p_tokens = usage.get("prompt_tokens", 0)
+        c_tokens = usage.get("completion_tokens", 0)
+        t_tokens = usage.get("total_tokens", 0)
 
-        # tagi stylów (nie przerywamy jeśli fontów brakuje)
+        # CZAS I MODEL
+        model_name = raw_data.get("model", "Nieznany")
+        gen_time = raw_data.get("time", 0)
+
+        # Formatowanie godziny wysłania
+        ts_raw = full_rec.get("timestamp", "")
         try:
-            text_widget.tag_configure("bold", font=("Roboto", 10, "bold"))
-            text_widget.tag_configure("italic", font=("Roboto", 10, "italic"))
-            text_widget.tag_configure("inlinecode", font=("Courier", 10))
-            text_widget.tag_configure("codeblock", font=("Courier", 9), background="#1f1f1f", foreground="#e6e6e6",
-                                      lmargin1=10, lmargin2=10)
-            text_widget.tag_configure("h1", font=("Roboto", 16, "bold"))
-            text_widget.tag_configure("h2", font=("Roboto", 14, "bold"))
-            text_widget.tag_configure("h3", font=("Roboto", 12, "bold"))
-        except Exception:
-            pass
+            timestamp = ts_raw.split("T")[1].split(".")[0] if "T" in ts_raw else ts_raw
+        except:
+            timestamp = datetime.now().strftime("%H:%M:%S")
 
-        # zablokuj edycję
-        text_widget.configure(state="disabled")
+        # 2. Budowa listy kontrolek (dodajemy 'thought' na początku treści bota)
+        content_controls = []
 
-        # policz rzeczywistą liczbę linii (po wrapowaniu)
-        # indeks 'end-1c' ma format "linia.kol", bierzemy numer linii
-        end_index = text_widget.index("end-1c")
-        try:
-            line_count = int(end_index.split('.')[0])
-        except Exception:
-            line_count = 1
+        if not is_user and thought_data:
+            content_controls.append(self._create_thought_block(thought_data))
 
-        # ogranicz wysokość, aby chat nie zajmował całego okna
-        height = max(1, min(max_height, line_count))
-        text_widget.configure(height=height)
+        # Treść Markdown
+        md_content = ft.Markdown(
+            text,
+            selectable=True,
+            extension_set=ft.MarkdownExtensionSet.GITHUB_FLAVORED,
+            code_theme="atom-one-dark",
+            md_style_sheet=ft.MarkdownStyleSheet(
+                blockquote_text_style=ft.TextStyle(color=TEXT_COLOR_FADED, italic=True),
+                blockquote_padding=ft.padding.all(10),
+                blockquote_decoration=ft.BoxDecoration(
+                    bgcolor=BG_HIDDEN_PANEL,
+                    border=ft.border.only(left=ft.BorderSide(3, ACCENT)),
+                    border_radius=ft.border_radius.only(top_right=5, bottom_right=5),
+                ),
+            ),
+        )
+        content_controls.append(md_content)
 
-        return height
+        # 3. Obrazek (wykres)
+        img_path = extra.get("image_path")
+        if img_path:
+            full_img_path = os.path.abspath(img_path)
+            if os.path.exists(full_img_path):
+                content_controls.append(
+                    ft.Image(src=full_img_path, border_radius=10, width=500, fit="contain")
+                )
 
-    def _setup_root(self):
-        self.root.title("WWZD MATH - Minimal Chat")
-        self.root.geometry(f"{WINDOW_W}x{WINDOW_H}")
-        self.root.minsize(600, 400)
-        self.root.configure(bg=BG_MAIN)
-        self.root.bind("<Configure>", lambda e: self.root.after(10, self._deferred_update_wraps))
+        content = ft.Column(content_controls, tight=True, spacing=10)
 
-    def _create_fonts(self):
-        self.font_header = font.Font(family="Roboto", size=22, weight="bold")
+        # 4. Panele INFO i JSON (zaktualizowane o reasoning)
+        info_grid = ft.Column([
+            ft.Text("STATYSTYKI SYSTEMOWE", size=12, weight=ft.FontWeight.BOLD, color=ACCENT),
+            ft.Row([
+                ft.Icon(ft.Icons.SPEED, size=16, color=TEXT_COLOR_FADED),
+                ft.Text(f"Model: {model_name} | Czas: {gen_time:.2f}s", size=12, color=TEXT_COLOR),
+            ]),
+            ft.Row([
+                ft.Icon(ft.Icons.TOKEN, size=16, color=TEXT_COLOR_FADED),
+                ft.Text(f"Tokeny: {t_tokens} (In: {p_tokens} / Out: {c_tokens})", size=12, color=TEXT_COLOR),
+            ]),
+            ft.Row([
+                ft.Icon(ft.Icons.SCHEDULE, size=16, color=TEXT_COLOR_FADED),
+                ft.Text(f"Wysłano: {timestamp}", size=12, color=TEXT_COLOR),
+            ]),
+            ft.Divider(height=1, color=CARD_BG),
+            ft.Text("LOGIKA (REASONING):", size=11, weight=ft.FontWeight.BOLD, color=TEXT_COLOR_FADED),
+            ft.Text(explanation, size=11, italic=True, color=TEXT_COLOR_FADED),
+        ], spacing=8)
 
-    def _create_layout(self):
-        self.root.grid_columnconfigure(0, weight=1)
-        self.root.grid_rowconfigure(1, weight=1)
+        info_panel = ft.Container(
+            content=info_grid, bgcolor=BG_HIDDEN_PANEL, padding=15,
+            border_radius=8, visible=False, border=ft.border.all(1, CARD_BG)
+        )
 
-    def _create_header(self):
-        header = tk.Frame(self.root, bg=BG_MAIN)
-        header.grid(row=0, column=0, sticky="n", padx=50, pady=(12, 6))
-        header.grid_columnconfigure(0, weight=1)
-        lbl = tk.Label(header, text="ROZMOWA", bg=BG_MAIN, fg="white", font=self.font_header)
-        lbl.grid(row=0, column=0, sticky="w", padx=(0, 20))
+        json_panel = ft.Container(
+            content=ft.Text(json.dumps(full_rec, indent=2, ensure_ascii=False),
+                            size=11, font_family="monospace", color=TEXT_COLOR_FADED),
+            bgcolor=BG_HIDDEN_PANEL, padding=10, border_radius=5, visible=False
+        )
 
-    def _create_messages_area(self):
-        style = ttk.Style()
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass
+        # 5. Funkcje przycisków
+        def toggle_info(e):
+            info_panel.visible = not info_panel.visible
+            json_panel.visible = False
+            self.page.update()
 
-        style.configure( "WWZD.Vertical.TScrollbar", gripcount=0, troughcolor=BG_MAIN,
-                         background=CARD_BG, darkcolor=BG_MAIN, lightcolor=BG_MAIN, bordercolor=BG_MAIN, arrowcolor=BG_MAIN, width=5 )
-        style.map( "WWZD.Vertical.TScrollbar",
-                   background=[ ("active", CARD_BG), ("pressed", BG_MAIN), ("disabled", BG_MAIN) ],
-                   arrowcolor=[ ("active", BG_MAIN), ("pressed", BG_MAIN), ("disabled", BG_MAIN) ] )
+        def toggle_json(e):
+            json_panel.visible = not json_panel.visible
+            info_panel.visible = False
+            self.page.update()
 
-        self.messages_container = tk.Frame(self.root, bg=BG_MAIN)
-        self.messages_container.grid(row=1, column=0, sticky="nswe", padx=10, pady=(0, 8))
-        self.messages_container.grid_rowconfigure(0, weight=1)
-        self.messages_container.grid_columnconfigure(0, weight=1)
+        if not is_user:
+            content.controls.append(
+                ft.Row([
+                    ft.TextButton("INFORMACJE", icon=ft.Icons.INFO_OUTLINE, on_click=toggle_info, icon_color=ACCENT),
+                    ft.TextButton("JSON", icon=ft.Icons.CODE, on_click=toggle_json, icon_color=TEXT_COLOR_FADED),
+                ], spacing=10)
+            )
+            content.controls.append(info_panel)
+            content.controls.append(json_panel)
 
-        self.canvas = tk.Canvas(self.messages_container, bg=BG_MAIN, highlightthickness=0, bd=0)
-        self.vsb = ttk.Scrollbar(self.messages_container, orient="vertical", command=self.canvas.yview,
-                                 style="WWZD.Vertical.TScrollbar")
-        self.canvas.configure(yscrollcommand=self.vsb.set)
-        self.canvas.grid(row=0, column=0, sticky="nswe")
-        self.vsb.grid(row=0, column=1, sticky="ns")
-
-        self.msgs_frame = tk.Frame(self.canvas, bg=BG_MAIN)
-        self.msgs_window = self.canvas.create_window((0, 0), window=self.msgs_frame, anchor="nw")
-
-        self.msgs_frame.bind("<Configure>", self._on_msgs_frame_configure)
-        self.canvas.bind("<Configure>", self._on_canvas_configure)
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-
-    def _on_msgs_frame_configure(self, event):
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        self.canvas.itemconfig(self.msgs_window, width=self.canvas.winfo_width())
-
-    def _on_canvas_configure(self, event):
-        self.canvas.itemconfig(self.msgs_window, width=event.width)
-        self._update_wraps(event.width)
-
-    def _on_mousewheel(self, event):
-        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-    def _create_send_bar(self):
-        send_bar = tk.Frame(self.root, bg=BG_MAIN)
-        send_bar.grid(row=2, column=0, sticky="we", padx=10, pady=10)
-        send_bar.grid_columnconfigure(0, weight=1)
-
-        send_container = tk.Frame(send_bar, bg=CARD_BG, bd=0)
-        send_container.grid(row=0, column=0, sticky="we")
-        send_container.grid_columnconfigure(0, weight=1)
-        send_container.grid_columnconfigure(1, weight=0)
-        send_container.grid_propagate(False)
-        send_container.configure(height=55)
-
-        self.text_area = tk.Text(send_container, height=2, wrap="word", bg=CARD_BG, fg="white", bd=0,
-                                 padx=15, pady=15, highlightthickness=0, insertbackground="white")
-        self.text_area.grid(row=0, column=0, sticky="we")
-
-        send_btn = tk.Button(send_container, text="➤", bg=CARD_BG, fg=ACCENT, relief="flat", borderwidth=0,
-                             activebackground=CARD_BG, activeforeground=ACCENT, font=("Roboto", 20, "bold"),
-                             cursor="hand2", command=self._on_send)
-        send_btn.grid(row=0, column=1, sticky="e", padx=(0, 16))
-        self.text_area.bind("<KeyPress>", self._on_text_keypress)
-
-    def _on_text_keypress(self, event):
-        if event.keysym == "Return" and not (event.state & 0x0001):
-            self._on_send()
-            return "break"
-
-    def _on_send(self):
-        content = self.text_area.get("1.0", "end").strip()
-        if not content:
-            return
-
-        try:
-            self.store.append_message("user", content, outgoing=True)
-        except Exception as e:
-            print("Warn: append outgoing:", e)
-
-        self.text_area.delete("1.0", "end")
-        self.refresh_from_store()
-
-        threading.Thread(target=self._call_logic_and_display, args=(content,), daemon=True).start()
-
-    def _call_logic_and_display(self, user_input: str):
-        try:
-            logic = self.chat_logic
-            if logic is None:
-                self.root.after(0, lambda: self._show_internal_message("(Brak ChatLogic)"))
-                return
-
-            if hasattr(logic, "call_method"):
-                try:
-                    logic.call_method(user_input)
-                except TypeError:
-                    logic.call_method()
-
-            if hasattr(logic, "read_message"):
-                logic.read_message()
-            if hasattr(logic, "parse_json"):
-                logic.parse_json()
-
-            response_obj = None
-            response_text = None
-            if hasattr(logic, "handle_response"):
-                try:
-                    response_obj = logic.handle_response()
-                except Exception:
-                    response_obj = None
-
-            # 3. Wyciągnięcie danych
-            response_text = "(Brak odpowiedzi)"
-            image_path = None
-            
-            if response_obj is not None:
-                response_text = getattr(response_obj, "message", str(response_obj))
-                # Tutaj pobieramy ścieżkę z obiektu ChatResult
-                image_path = getattr(response_obj, "image_path", None)
-            elif logic.last_message:
-                response_text = logic.last_message
-            
-            # 4. Pakowanie do extra dla ChatStore
-            extra = {}
-            if response_obj is not None:
-                raw = getattr(response_obj, "raw_json", None)
-                if raw: extra["raw_json"] = raw
-                # WAŻNE: Zapisujemy image_path do historii
-                if image_path: extra["image_path"] = image_path
-
-            # 5. Zapis w bazie i odświeżenie UI
-            self.store.append_message("bot", str(response_text), outgoing=False, extra=extra)
-            self.root.after(0, lambda: self.refresh_from_store())
-
-        except Exception as e:
-            self.root.after(0, lambda: self._show_internal_message(f"(Błąd ChatLogic): {e}"))
+        return ft.Row(
+            [ft.Container(
+                content=content,
+                bgcolor=CARD_BG if is_user else ft.Colors.TRANSPARENT,
+                padding=15, border_radius=15, width=600 if is_user else 800,
+            )],
+            alignment=ft.MainAxisAlignment.END if is_user else ft.MainAxisAlignment.START
+        )
 
     def refresh_from_store(self):
-        msgs = self.store.load_all()
+        self.chat_view.controls.clear()
+        for rec in self.store.load_all():
+            self.chat_view.controls.append(
+                self._create_bubble(rec.get("role"), rec.get("text"), rec.get("extra", {}), rec)
+            )
+        # Odświeżamy widok kontrolek
+        self.chat_view.update()
 
-        for w in self.msgs_frame.winfo_children():
-            w.destroy()
-        self._message_widgets.clear()
-        
-        # WAŻNE: Czyścimy referencje obrazków przy każdym odświeżeniu
-        self._image_refs.clear()
+        if self.page:
+            self.page.update()
+            self.page.run_task(self.chat_view.scroll_to, offset=-1, duration=0)
 
-        for rec in msgs:
-            role = rec.get("role", "bot")
-            text = rec.get("text", "")
-            if role == "user":
-                self._create_user_widget(text, rec)
-            else:
-                self._create_bot_widget(text, rec)
+    def _on_send(self):
 
-        self._deferred_update_wraps()
-        self.canvas.yview_moveto(1.0)
+        val = self.input_field.value.strip()
+        if not val: return
 
-    def _create_user_widget(self, text: str, rec: dict):
-        wrapper = tk.Frame(self.msgs_frame, bg=BG_MAIN)
-        wrapper.pack(fill="x", pady=6, padx=12)
-        bubble = tk.Frame(wrapper, bg=CARD_BG, padx=12, pady=10)
-        bubble.pack(side="right", anchor="e")
+        self.store.append_message("user", val, outgoing=True)
+        self.input_field.value = ""
+        self.refresh_from_store()
 
-        txt = tk.Text(bubble, bg=CARD_BG, fg="white", bd=0, wrap="word", height=1, padx=6, pady=4,
-                      highlightthickness=0)
-        txt.pack(fill="x")
-        try:
-            self._render_markdown_to_text(txt, text, max_height=30)
-        except Exception:
-            txt.configure(state="normal")
-            txt.delete("1.0", "end")
-            txt.insert("1.0", text)
-            txt.configure(state="disabled")
+        threading.Thread(target=self._logic_worker, args=(val,), daemon=True).start()
 
-        self._message_widgets.append((wrapper, rec))
-
-    def _create_bot_widget(self, text: str, rec: dict):
-        wrapper = tk.Frame(self.msgs_frame, bg=BG_MAIN)
-        wrapper.pack(fill="x", pady=6, padx=12)
-
-        bubble = tk.Frame(wrapper, bg=BG_MAIN)
-        bubble.pack(fill="x", anchor="w")
-
-        # 1. Tekst
-        txt = tk.Text(bubble, bg=BG_MAIN, fg=TEXT_COLOR, bd=0, wrap="word", height=1, padx=6, pady=4,
-                      highlightthickness=0, insertbackground="white")
-        txt.pack(fill="x", anchor="w", padx=(12, 0))
-
-        try:
-            h = self._render_markdown_to_text(txt, text) 
-            txt.configure(height=h)
-        except Exception as e:
-            txt.configure(state="normal")
-            txt.delete("1.0", "end")
-            txt.insert("1.0", text)
-            txt.configure(state="disabled")
-            print("Warn: markdown render failed:", e)
-
-        # 2. Obrazek (jeśli istnieje w extra)
-        extra = rec.get("extra", {})
-        img_path = extra.get("image_path")
-        
-        if img_path:
-            self._render_image(bubble, img_path)
-
-        # 3. Przyciski (JSON)
-        buttons_row = tk.Frame(wrapper, bg=BG_MAIN)
-        buttons_row.pack(fill="x", padx=12, pady=(6, 0))
-        
-        json_frame = tk.Frame(wrapper, bg=BG_HIDDEN_PANEL)
-        jtext = tk.Text(json_frame, height=10, bg=BG_HIDDEN_PANEL, fg=TEXT_COLOR_FADED, bd=0, padx=8, pady=8)
-        try: pretty = json.dumps(rec, indent=2, ensure_ascii=False)
-        except: pretty = str(rec)
-        jtext.insert("1.0", pretty)
-        jtext.configure(state="disabled")
-        jtext.pack(fill="x")
-
-        def _toggle_json():
-            if json_frame.winfo_ismapped(): json_frame.pack_forget()
-            else: json_frame.pack(fill="x", padx=12, pady=6); self.canvas.yview_moveto(1.0)
-
-        b = tk.Button(buttons_row, text="JSON", command=_toggle_json, bg=BG_MAIN, fg=TEXT_COLOR, relief="flat", activebackground=BG_MAIN)
-        b.pack(side="left")
-
-        self._message_widgets.append((wrapper, rec))
-
-    # --- RYSOWANIE OBRAZKA ---
-    def _render_image(self, parent, path):
-        if not os.path.exists(path):
-            err = tk.Label(parent, text=f"[Plik nie istnieje: {path}]", bg=BG_MAIN, fg="red")
-            err.pack(anchor="w", padx=12)
+        """
+        KOD DO TESTOWANAI NA SUCHO
+        user_text = self.input_field.value.strip()
+        if not user_text:
             return
 
-        try:
-            # Ładowanie przez PIL
-            pil_img = Image.open(path)
-            
-            # Skalowanie, jeśli za szeroki
-            max_w = 600
-            w, h = pil_img.size
-            if w > max_w:
-                ratio = max_w / w
-                new_size = (int(w * ratio), int(h * ratio))
-                pil_img = pil_img.resize(new_size, Image.Resampling.LANCZOS)
-            
-            # Konwersja na format Tkinter
-            tk_img = ImageTk.PhotoImage(pil_img)
-            
-            # WAŻNE: Dodanie do listy referencji
-            self._image_refs.append(tk_img) 
-
-            # Wyświetlenie w Label
-            lbl = tk.Label(parent, image=tk_img, bg=BG_MAIN, bd=0)
-            lbl.pack(anchor="w", padx=(12, 0), pady=10)
-            
-        except Exception as e:
-            err = tk.Label(parent, text=f"[Błąd obrazka: {e}]", bg=BG_MAIN, fg="red")
-            err.pack(anchor="w", padx=12)
-
-    def _update_wraps(self, width):
-        pad = 40
-        usable = max(0, width - pad)
-        max_bubble = max(MIN_BUBBLE, int(usable * BUBBLE_RATIO))
-        for wrapper, rec in self._message_widgets:
-            for child in wrapper.winfo_children():
-                if isinstance(child, tk.Frame):
-                    for inner in child.winfo_children():
-                        if isinstance(inner, tk.Label):
-                            try:
-                                inner.configure(wraplength=max_bubble)
-                            except Exception:
-                                pass
-
-    def _deferred_update_wraps(self):
-        try:
-            w = self.canvas.winfo_width()
-            if w > 10: 
-                self.canvas.itemconfig(self.msgs_window, width=w)
-                self._update_wraps(w)
-        except Exception:
-            pass
-
-    def _show_internal_message(self, text):
-        self.store.append_message("bot", text, False, {"internal": True})
+        self.store.append_message(role="user", text=user_text, outgoing=True)
+        self.input_field.value = ""
         self.refresh_from_store()
+
+        def simulate_bot():
+            time.sleep(1)  # Udajemy, że model myśli
+
+            # TEST 1: Standardowa odpowiedź z procesem myślowym
+            self.store.append_message(
+                role="bot",
+                text="Wynik Twojego równania to x = 5.",
+                thought="Użytkownik podał równanie liniowe. Wykorzystuję EquationSolver. Normalizuję wyrażenie... Rozwiązuję: 2x - 10 = 0.",
+                extra={"raw_json": {"model": "Model-Testowy", "time": 0.5}}
+            )
+            self.refresh_from_store()
+
+            time.sleep(1.5)
+
+            # TEST 2: Odpowiedź z wykresem i opisem działań pośrednich
+            self.store.append_message(
+                role="bot",
+                text="Oto wykres funkcji sinus.",
+                thought="Przekierowuję dane do PlotLogic. Generuję punkty dla zakresu -10 do 10. Zapisuję obraz do ui/images/plot_test.png.",
+                extra={
+                    "image_path": "ui/images/plot_13a77d7310af4678993e946472aac9c3.png",
+                    "raw_json": {"usage": {"total_tokens": 150}, "model": "Plot-Master"}
+                }
+            )
+            self.refresh_from_store()
+
+        # Uruchamiamy symulację w osobnym wątku, żeby nie zamrozić UI
+        threading.Thread(target=simulate_bot, daemon=True).start()
+        """
+
+    def _logic_worker(self, user_input):
+        msg_id = None
+        try:
+            logic = self.chat_logic
+
+            # KROK 1: NATYCHMIAST dodajemy dymek statusu
+            # To pojawi się w UI w momencie, gdy w konsoli zobaczysz start logiki
+            temp_rec = self.store.append_message(
+                role="bot",
+                text="Oczekiwanie na odpowiedź...",
+                thought="Łączenie z API i analiza zapytania..."
+            )
+            msg_id = temp_rec["id"]
+            self.refresh_from_store()  # Wymuszamy odświeżenie UI, by pokazać ten dymek
+
+            # KROK 2: Teraz wykonujemy ciężką pracę (tu pojawia się DEBUG w konsoli)
+            if hasattr(logic, "call_method"):
+                logic.call_method(user_input)
+
+            # (Opcjonalnie) Możesz tu dodać aktualizację statusu po odebraniu API
+            self.store.update_message(msg_id, thought="Odebrano dane, przetwarzam wynik...")
+            self.refresh_from_store()
+
+            if hasattr(logic, "read_message"): logic.read_message()
+            if hasattr(logic, "parse_json"): logic.parse_json()
+
+            res = logic.handle_response() if hasattr(logic, "handle_response") else None
+
+            # KROK 3: WYCIĄGANIE DANYCH KOŃCOWYCH
+            txt = getattr(res, "message", "Brak odpowiedzi")
+            img = getattr(res, "image_path", None)
+            raw_json = getattr(res, "raw_json", {})
+
+            # Pobieramy prawdziwe myślenie z API (reasoning)
+            thought_final = None
+            try:
+                thought_final = raw_json['choices'][0]['message'].get('reasoning')
+            except:
+                pass
+
+            if not thought_final:
+                thought_final = "Obliczenia zakończone pomyślnie."
+
+            extra = {"raw_json": raw_json}
+            if img: extra["image_path"] = img
+
+            # KROK 4: AKTUALIZACJA - zamieniamy "Oczekiwanie..." na gotowy tekst
+            self.store.update_message(
+                message_id=msg_id,
+                text=str(txt),
+                thought=thought_final,
+                extra=extra
+            )
+            self.refresh_from_store()
+
+        except Exception as e:
+            if msg_id:
+                self.store.update_message(msg_id, text=f"Błąd: {e}", thought="Wystąpił problem.")
+            else:
+                self.store.append_message("bot", f"Błąd systemowy: {e}", False, {"internal": True})
+            self.refresh_from_store()
