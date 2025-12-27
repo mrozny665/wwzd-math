@@ -6,49 +6,65 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Optional, Any
+import shutil
 
-DEFAULT_CHAT_DIR = os.path.join("ui", "chats")
-DEFAULT_CHAT_FILE = os.path.join(DEFAULT_CHAT_DIR, "temp.json")
+CHAT_DIR = os.path.join("ui", "chats")
+CATALOG_CHAT_DIR = os.path.join(CHAT_DIR, "temp")
+CHAT_FILE = os.path.join(CATALOG_CHAT_DIR, "temp.json")
 
 
 class ChatStore:
-    """
-    Bufor konwersacji w postaci pliku JSON.
-    Każdy rekord to dict z polami:
-      - id (uuid str)
-      - timestamp (ISO8601 timezone-aware)
-      - role ('user' / 'bot')
-      - outgoing (bool)
-      - text (str)
-      - extra (optional dict)
-    """
-
     def __init__(self, path: Optional[str] = None, clear_on_start: bool = True):
-        self.path = path or DEFAULT_CHAT_FILE
+        self.path = path or CHAT_FILE
         self.dir = os.path.dirname(self.path) or "."
         self._lock = threading.Lock()
         os.makedirs(self.dir, exist_ok=True)
+
         if clear_on_start:
             self._clear_file()
         else:
             if not os.path.exists(self.path):
-                with open(self.path, "w", encoding="utf-8") as f:
-                    json.dump([], f, ensure_ascii=False)
+                with self._lock:
+                    with open(self.path, "w", encoding="utf-8") as f:
+                        json.dump([], f, ensure_ascii=False)
+
+    def get_chats(self):
+        """Zwraca listę nazw podfolderów znajdujących się w katalogu chats."""
+        try:
+            if not os.path.exists(CHAT_DIR):
+                return []
+            folders = [
+                name for name in os.listdir(CHAT_DIR)
+                if os.path.isdir(os.path.join(CHAT_DIR, name))
+            ]
+            folders.sort()
+
+            return folders
+        except Exception as e:
+            print(f"Błąd podczas pobierania listy czatów: {e}")
+            return []
 
     def _clear_file(self) -> None:
         with self._lock:
+            # 1. Czyszczenie pliku JSON
             with open(self.path, "w", encoding="utf-8") as f:
                 json.dump([], f, ensure_ascii=False, indent=2)
+
+            # 2. Czyszczenie folderu images
+            img_dir = os.path.join(self.dir, "images")
+            if os.path.exists(img_dir):
+                try:
+                    shutil.rmtree(img_dir)
+                    os.makedirs(img_dir, exist_ok=True)
+                except Exception as e:
+                    print(f"Błąd podczas czyszczenia folderu images: {e}")
+            else:
+                os.makedirs(img_dir, exist_ok=True)
 
     # ----------------------
     # Serializacja specjalnych obiektów (ChatCompletion-like)
     # ----------------------
     def _serialize_choice(self, choice: Any) -> dict:
-        """
-        Serializuje obiekt choice (może być dict lub obiekt).
-        Zwraca dict z najszerszym zakresem pól z message (content, role, refusal, annotations,
-        function_call, tool_calls, reasoning, reasoning_details) oraz finish_reason, index, logprobs.
-        """
         # dict-friendly path
         if isinstance(choice, dict):
             msg = choice.get("message") or {}
@@ -333,13 +349,24 @@ class ChatStore:
             for rec in data:
                 if rec.get("id") == message_id:
                     if text is not None: rec["text"] = text
-                    if thought is not None: rec["thought"] = thought
+                    if thought is not None:
+                        if "history_thought" not in rec:
+                            rec["history_thought"] = []
+
+                        current_thought = rec.get("thought")
+
+                        if thought != current_thought:
+                            rec["history_thought"].append({
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "content": thought
+                            })
+                            rec["thought"] = thought
                     if extra is not None:
-                        # Łączymy stare extra z nowym
                         existing_extra = rec.get("extra", {})
                         norm_new = self._normalize_extra(extra)
                         existing_extra.update(self._make_json_safe(norm_new))
                         rec["extra"] = existing_extra
+
                     found = True
                     break
 
@@ -363,3 +390,85 @@ class ChatStore:
                     return data
             except Exception:
                 return []
+
+    # -------
+    # Zwracanie ścieżki dla innych
+    # --------
+
+    def get_images_dir(self) -> str:
+        """Zwraca ścieżkę do folderu z obrazami dla aktualnej sesji."""
+        img_dir = os.path.join(self.dir, "images")
+        os.makedirs(img_dir, exist_ok=True)
+        return img_dir
+
+    def get_current_chat_path(self) -> str:
+        """Zwraca pełną ścieżkę do aktualnie używanego pliku JSON czatu."""
+        return self.path
+
+    # ---------
+    # Zmiany i zapis katalogów
+    # --------
+    def save_session_as(self, new_session_name: str):
+        """Kopiuje obecną sesję (temp) do nowej nazwy i aktualizuje ścieżki obrazów."""
+        with self._lock:
+            # 1. Nowe ścieżki
+            new_dir = os.path.join(CHAT_DIR, new_session_name)
+            new_path = os.path.join(new_dir, f"{new_session_name}.json")
+            os.makedirs(new_dir, exist_ok=True)
+
+            # 2. Przetwarzanie i aktualizacja danych JSON
+            if os.path.exists(self.path):
+                try:
+                    with open(self.path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+
+                    # ITERACJA PO WIADOMOŚCIACH - Naprawa ścieżek
+                    for msg in data:
+                        if "extra" in msg and isinstance(msg["extra"], dict):
+                            old_img_path = msg["extra"].get("image_path")
+                            if old_img_path and "temp" in old_img_path:
+                                # Wyciągamy samą nazwę pliku (np. plot_xyz.png)
+                                filename = os.path.basename(old_img_path)
+                                # Budujemy nową ścieżkę wskazującą na nowy folder
+                                new_img_relative_path = os.path.join(new_dir, "images", filename)
+                                msg["extra"]["image_path"] = new_img_relative_path
+
+                    # Zapisujemy zaktualizowany JSON w nowym miejscu
+                    with open(new_path, "w", encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+                except Exception as e:
+                    print(f"Błąd aktualizacji JSON: {e}")
+
+            # 3. Kopiowanie folderu images
+            old_img_dir = os.path.join(self.dir, "images")
+            new_img_dir = os.path.join(new_dir, "images")
+
+            if os.path.exists(old_img_dir):
+                if os.path.exists(new_img_dir):
+                    shutil.rmtree(new_img_dir)
+                try:
+                    shutil.copytree(old_img_dir, new_img_dir)
+                except Exception as e:
+                    print(f"Błąd kopiowania obrazów: {e}")
+
+            # 4. Przełączenie aktywnej ścieżki w programie
+            self.dir = new_dir
+            self.path = new_path
+
+    def load_session(self, session_name: str):
+        """Przełącza aktywną sesję na istniejący folder."""
+        with self._lock:
+            # Ustawiamy ścieżki na wybrany folder
+            new_dir = os.path.join(CHAT_DIR, session_name)
+            # Zakładamy, że plik json nazywa się tak samo jak folder
+            new_path = os.path.join(new_dir, f"{session_name}.json")
+
+            if os.path.exists(new_path):
+                self.dir = new_dir
+                self.path = new_path
+                print(f"Załadowano sesję: {session_name}")
+                return True
+            else:
+                print(f"Błąd: Plik {new_path} nie istnieje!")
+                return False
+

@@ -23,12 +23,16 @@ class ChatUI:
         self.chat_logic = chat_logic
         self.store = store
 
-        # Konfiguracja strony
+        # Konfiguracja strony - usuwamy padding i spacing
         self.page.bgcolor = BG_MAIN
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.padding = 0
+        self.page.spacing = 0
 
-        # Kontener na wiadomości
+        self.page.add(self._build_layout())
+        self.refresh_from_store()
+    def _build_main_layaut(self):
+        # 1. Kontener na wiadomości
         self.chat_view = ft.ListView(
             expand=True,
             spacing=15,
@@ -36,7 +40,7 @@ class ChatUI:
             auto_scroll=True
         )
 
-        # Pole tekstowe
+        # 2. Pole tekstowe
         self.input_field = ft.TextField(
             hint_text="Napisz wiadomość...",
             fill_color=CARD_BG,
@@ -44,56 +48,215 @@ class ChatUI:
             border_radius=15,
             border_color=ft.Colors.TRANSPARENT,
             expand=True,
-            multiline=True,
-            min_lines=1,
-            max_lines=5,
             on_submit=lambda _: self._on_send(),
         )
 
-        self._build_layout()
-        self.refresh_from_store()
+        self.main_layout = ft.Column([
+            self.chat_view,
+            ft.Container(
+                content=ft.Row([
+                    self.input_field,
+                    ft.IconButton(
+                        icon=ft.Icons.SEND_ROUNDED,
+                        icon_color=ACCENT,
+                        on_click=lambda _: self._on_send()
+                    )
+                ]),
+                padding=20
+            )
+        ], expand=True, spacing=0)
+
+    def _build_saidbar(self):
+        chat_names = self.store.get_chats()
+
+        # Lista czatów wewnątrz kolumny, która się przewija
+        self.chat_list_column = ft.Column(
+            [
+                ft.Text("MOJE CZATY", weight="bold", size=14, color=ACCENT),
+                ft.Divider(color=CARD_BG, thickness=1),
+            ],
+            spacing=10,
+            expand=True,
+            scroll=ft.ScrollMode.AUTO
+        )
+
+        for name in chat_names:
+            self.chat_list_column.controls.append(
+                ft.Container(
+                    content=ft.Text(name, color=TEXT_COLOR, size=13),
+                    padding=ft.padding.all(12),
+                    border_radius=8,
+                    ink=True,
+                    on_click=lambda e, n=name: self._load_selected_chat(n),
+                )
+            )
+
+        # Kontener paska bocznego
+        self.side_panel = ft.Container(
+            content=self.chat_list_column,
+            width=260,
+            bgcolor=BG_HIDDEN_PANEL,
+            padding=20,
+            border=ft.border.only(right=ft.BorderSide(1, CARD_BG)),
+        )
+
+    def _build_top_bar(self):
+        # Pole do wpisania nazwy czatu
+        self.chat_name_input = ft.TextField(
+            value="Rozmowa",
+            hint_text="Nazwa rozmowy...",
+            text_size=14,
+            color="white",
+            border_radius=10,
+            border_color=CARD_BG,
+            height=40,
+            content_padding=ft.padding.only(left=15, right=15),
+            expand=True
+        )
+
+        # Przycisk zapisu
+        save_button = ft.Button(
+            content="Zapisz",
+            icon=ft.Icons.SAVE,
+                style=ft.ButtonStyle(
+                color="white",
+                bgcolor="default",
+                shape=ft.RoundedRectangleBorder(radius=10),
+            ),
+            on_click=self._on_save_click
+        )
+
+        # Kontener górnego paska
+        self.top_bar = ft.Container(
+            content=ft.Row([
+                self.chat_name_input,
+                save_button
+            ], spacing=15),
+            padding=ft.padding.symmetric(vertical=10, horizontal=20),
+            bgcolor=BG_MAIN,
+            border=ft.border.only(bottom=ft.BorderSide(1, CARD_BG))
+        )
+
+    def _on_save_click(self):
+        new_name = self.chat_name_input.value.strip()
+        if not new_name or new_name.lower() == "temp":
+            print("Nieprawidłowa nazwa sesji")
+            return
+
+        # Wywołujemy logikę zapisu
+        self.store.save_session_as(new_name)
+
+        # Odświeżamy pasek boczny, aby pokazał nową sesję
+        self._refresh_sidebar()
+
+        # Opcjonalnie: powiadomienie dla użytkownika
+        self.page.snack_bar = ft.SnackBar(ft.Text(f"Zapisano jako: {new_name}"))
+        self.page.snack_bar.open = True
+        self.page.update()
+
+    def _refresh_sidebar(self):
+        """Przebudowuje listę czatów na pasku bocznym."""
+        self.chat_list_column.controls = self.chat_list_column.controls[:2]
+
+        chat_names = self.store.get_chats()
+
+        for name in chat_names:
+            self.chat_list_column.controls.append(
+                ft.Container(
+                    content=ft.Text(name, color=TEXT_COLOR, size=13),
+                    padding=ft.padding.all(12),
+                    border_radius=8,
+                    ink=True,
+                    on_click=lambda e, n=name: self._load_selected_chat(n),
+                )
+            )
+        self.page.update()
+
+    def _load_selected_chat(self, name: str):
+        success = self.store.load_session(name)
+
+        if success:
+            # 2. Aktualizujemy nazwę w polu tekstowym na górze
+            self.chat_name_input.value = name
+
+            # 3. Czyścimy okno czatu i ładujemy nowe wiadomości
+            # refresh_from_store to Twoja istniejąca metoda, która buduje listę wiadomości
+            self.refresh_from_store()
+
+            # 4. Powiadomienie (opcjonalnie)
+            self.page.snack_bar = ft.SnackBar(ft.Text(f"Wczytano: {name}"), duration=1500)
+            self.page.snack_bar.open = True
+            self.page.update()
 
     def _build_layout(self):
-        # Nagłówek
-        header = ft.Container(
-            content=ft.Text("ROZMOWA", size=24, weight="bold", color="white"),
-            padding=ft.padding.only(left=25, top=15, bottom=15),
-            bgcolor=BG_MAIN,
+        self._build_main_layaut()
+        self._build_saidbar()
+        self._build_top_bar()
+
+        lay = ft.Column(
+            controls=[
+                self.top_bar,
+                self.main_layout
+            ],
+            expand=True,
+            spacing=0
         )
 
-        # Pasek wysyłania
-        send_bar = ft.Container(
-            content=ft.Row([
-                self.input_field,
-                ft.IconButton(
-                    icon=ft.Icons.SEND_ROUNDED,
-                    icon_color=ACCENT,
-                    icon_size=30,
-                    on_click=lambda _: self._on_send()
-                )
-            ], tight=True),
-            padding=20,
+        return ft.Row(
+            controls=[
+                self.side_panel,
+                lay
+            ],
+            expand=True,
+            spacing=0,
+            vertical_alignment = ft.CrossAxisAlignment.STRETCH
         )
 
-        # Dodanie wszystkiego do strony
-        self.page.add(
-            header,
-            ft.Divider(height=1, color=CARD_BG),
-            self.chat_view,
-            send_bar
-        )
-
-    def _create_thought_block(self, thought_text: str):
+    def _create_thought_block(self, thought_text: str, history: list = None):
         if not thought_text:
             return ft.Container()
+
+        history_column = ft.Column(visible=False, spacing=10)
+
+        if history:
+            history_column.controls.append(ft.Divider(height=1, color=ft.Colors.with_opacity(0.1, ACCENT)))
+            for idx, entry in enumerate(history):
+                ts = entry.get("timestamp", "")
+                t_str = ts.split("T")[-1][:8] if "T" in ts else "??:??:??"
+                history_column.controls.append(
+                    ft.Column([
+                        ft.Text(f"({t_str}):", size=10, weight="bold", color=ACCENT),
+                        ft.Text(entry.get("content", ""), size=10, italic=True, color=TEXT_COLOR_FADED),
+                    ], spacing=2)
+                )
+
+        def toggle_history(e):
+            history_column.visible = not history_column.visible
+            # Zmieniamy ikonę w zależności od stanu
+            e.control.icon = ft.Icons.KEYBOARD_ARROW_UP if history_column.visible else ft.Icons.HISTORY
+            e.control.update()
+            history_column.update()
 
         return ft.Container(
             content=ft.Column([
                 ft.Row([
-                    ft.Icon(ft.Icons.AUTO_AWESOME, size=15, color=ACCENT),
-                    ft.Text("Działania:", size=11, weight=ft.FontWeight.BOLD, color=ACCENT),
-                ]),
+                    ft.Row([
+                        ft.Icon(ft.Icons.AUTO_AWESOME, size=15, color=ACCENT),
+                        ft.Text("Działania:", size=11, weight=ft.FontWeight.BOLD, color=ACCENT),
+                    ], expand=True),
+                    # Mały, dyskretny przycisk historii (widoczny tylko jeśli jest historia)
+                    ft.IconButton(
+                        icon=ft.Icons.HISTORY,
+                        icon_size=14,
+                        icon_color=TEXT_COLOR_FADED,
+                        tooltip="Pokaż historię zmian myślenia",
+                        on_click=toggle_history,
+                        visible=True if history and len(history) > 1 else False,
+                        style=ft.ButtonStyle(padding=0)
+                    )
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 ft.Text(thought_text, size=11, italic=True, color=TEXT_COLOR_FADED),
+                history_column  # Tutaj pojawi się historia po kliknięciu
             ], spacing=5),
             bgcolor=ft.Colors.with_opacity(0.05, ACCENT),
             padding=12,
@@ -107,6 +270,7 @@ class ChatUI:
 
         # Pobieranie pola 'thought' bezpośrednio z rekordu (zgodnie z nowym ChatStore)
         thought_data = full_rec.get("thought")
+        thought_history = full_rec.get("history_thought", [])
 
         # 1. Pobieranie surowych danych z JSONa do statystyk
         raw_data = extra.get("raw_json", {})
@@ -138,7 +302,7 @@ class ChatUI:
         content_controls = []
 
         if not is_user and thought_data:
-            content_controls.append(self._create_thought_block(thought_data))
+            content_controls.append(self._create_thought_block(thought_data, thought_history))
 
         # Treść Markdown
         md_content = ft.Markdown(
@@ -303,17 +467,15 @@ class ChatUI:
             # To pojawi się w UI w momencie, gdy w konsoli zobaczysz start logiki
             temp_rec = self.store.append_message(
                 role="bot",
-                text="Oczekiwanie na odpowiedź...",
+                text="...",
                 thought="Łączenie z API i analiza zapytania..."
             )
             msg_id = temp_rec["id"]
             self.refresh_from_store()  # Wymuszamy odświeżenie UI, by pokazać ten dymek
 
-            # KROK 2: Teraz wykonujemy ciężką pracę (tu pojawia się DEBUG w konsoli)
             if hasattr(logic, "call_method"):
                 logic.call_method(user_input)
 
-            # (Opcjonalnie) Możesz tu dodać aktualizację statusu po odebraniu API
             self.store.update_message(msg_id, thought="Odebrano dane, przetwarzam wynik...")
             self.refresh_from_store()
 
@@ -322,12 +484,10 @@ class ChatUI:
 
             res = logic.handle_response() if hasattr(logic, "handle_response") else None
 
-            # KROK 3: WYCIĄGANIE DANYCH KOŃCOWYCH
             txt = getattr(res, "message", "Brak odpowiedzi")
             img = getattr(res, "image_path", None)
             raw_json = getattr(res, "raw_json", {})
 
-            # Pobieramy prawdziwe myślenie z API (reasoning)
             thought_final = None
             try:
                 thought_final = raw_json['choices'][0]['message'].get('reasoning')
@@ -340,7 +500,6 @@ class ChatUI:
             extra = {"raw_json": raw_json}
             if img: extra["image_path"] = img
 
-            # KROK 4: AKTUALIZACJA - zamieniamy "Oczekiwanie..." na gotowy tekst
             self.store.update_message(
                 message_id=msg_id,
                 text=str(txt),

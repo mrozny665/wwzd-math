@@ -28,7 +28,8 @@ class ChatResult:
 
 
 class ChatLogic:
-    def __init__(self):
+    def __init__(self, store=None):
+        self.store = store
         self.message: Optional[Any] = None
         self.data: Optional[Any] = None
         self.response: Optional[Any] = None  # obiekt/str zwrócony przez API po wywołaniu
@@ -40,7 +41,7 @@ class ChatLogic:
         self._system_added = False
         self.calculus_engine = CalculusEngine()
         self.equation_solver = EquationSolver()
-        self.plot_logic = PlotLogic()
+        self.plot_logic = PlotLogic(store=self.store)
 
     def read_env(self):
         self.env = Env()
