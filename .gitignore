@@ -1,5 +1,5 @@
 .env
 .idea
-logic/__pycache__/ChatLogic.cpython-312.pyc
+logic/__pycache__
 ui/__pycache__
 ui/chats

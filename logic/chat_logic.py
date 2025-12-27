@@ -48,14 +48,12 @@ class ChatLogic:
 
     def safe_eval_math(self, expression: str, variables=None):
         try:
-            # normalizacja (potęgowanie, brakujący operator mnożenia)
-            expr = self._normalize_expression(expression)
+            expr = self.equation_solver._normalize_expression(expression)
             parsed = ast.parse(expr, mode="eval")
-            val = self._eval_ast(parsed, variables)
+            val = self.plot_logic._eval_ast(parsed, variables)
             return {"result": val}
         except Exception as e:
             return {"error": str(e)}
-
 
     def _coerce_action_input(self, container: Any) -> dict:
         """Zwraca dict z action_input lub fallbackiem na klucz expression."""
@@ -94,7 +92,7 @@ class ChatLogic:
         # znormalizuj expression w payloadzie (np. 2x -> 2*x)
         if isinstance(payload, dict) and payload.get("expression"):
             payload = dict(payload)
-            payload["expression"] = self._normalize_expression(str(payload["expression"]))
+            payload["expression"] = self.equation_solver._normalize_expression(str(payload["expression"]))
             expr = payload["expression"]
         expr_display = "" if expr is None else str(expr)
         message = f"📞 Model poprosił o pochodną: {expr_display}\n"
@@ -115,7 +113,7 @@ class ChatLogic:
         # znormalizuj expression w payloadzie (np. 2x -> 2*x)
         if isinstance(payload, dict) and payload.get("expression"):
             payload = dict(payload)
-            payload["expression"] = self._normalize_expression(str(payload["expression"]))
+            payload["expression"] = self.equation_solver._normalize_expression(str(payload["expression"]))
             expr = payload["expression"]
         expr_display = "" if expr is None else str(expr)
         message = f"📞 Model poprosił o całkę: {expr_display}\n"
