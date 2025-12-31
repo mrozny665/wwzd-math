@@ -31,6 +31,9 @@ class ChatUI:
 
         self.page.add(self._build_layout())
         self.refresh_from_store()
+        # ID wiadomości bota, którą aktualnie „streamujemy” statusem
+        self._active_bot_msg_id: str | None = None
+
     def _build_main_layaut(self):
         # 1. Kontener na wiadomości
         self.chat_view = ft.ListView(
@@ -464,18 +467,28 @@ class ChatUI:
             logic = self.chat_logic
 
             # KROK 1: NATYCHMIAST dodajemy dymek statusu
-            # To pojawi się w UI w momencie, gdy w konsoli zobaczysz start logiki
             temp_rec = self.store.append_message(
                 role="bot",
                 text="...",
                 thought="Łączenie z API i analiza zapytania..."
             )
             msg_id = temp_rec["id"]
-            self.refresh_from_store()  # Wymuszamy odświeżenie UI, by pokazać ten dymek
+            self._active_bot_msg_id = msg_id
+            self.refresh_from_store()
+
+            # Callback postępu z logiki -> aktualizacja thought + refresh UI
+            def on_progress(th: str):
+                if not self._active_bot_msg_id:
+                    return
+                self.store.update_message(self._active_bot_msg_id, thought=th)
+                self.refresh_from_store()
+
+            logic.on_progress = on_progress
 
             if hasattr(logic, "call_method"):
                 logic.call_method(user_input)
 
+            # jeśli logika nie emituje progresu, zostawiamy fallback
             self.store.update_message(msg_id, thought="Odebrano dane, przetwarzam wynik...")
             self.refresh_from_store()
 
@@ -514,3 +527,12 @@ class ChatUI:
             else:
                 self.store.append_message("bot", f"Błąd systemowy: {e}", False, {"internal": True})
             self.refresh_from_store()
+        finally:
+            # wyczyść callback i aktywne ID, żeby kolejne wątki nie mieszały statusów
+            try:
+                if getattr(self.chat_logic, "on_progress", None):
+                    self.chat_logic.on_progress = None
+            except Exception:
+                pass
+            self._active_bot_msg_id = None
+
