@@ -94,14 +94,35 @@ class ChatUI:
                 )
             )
 
-        # Kontener paska bocznego
+        new_chat_btn = ft.ListTile(
+            leading=ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE, color=ACCENT),
+            title=ft.Text("NOWY CZAT", size=13, weight="bold", color=ACCENT),
+            on_click=self._on_new_chat_click,
+            hover_color=CARD_BG,
+        )
+
+        sidebar_content = ft.Column([
+            self.chat_list_column,
+            ft.Divider(color=CARD_BG),
+            new_chat_btn
+        ])
+
         self.side_panel = ft.Container(
-            content=self.chat_list_column,
+            content=sidebar_content,
             width=260,
             bgcolor=BG_HIDDEN_PANEL,
             padding=20,
             border=ft.border.only(right=ft.BorderSide(1, CARD_BG)),
         )
+
+    def _on_new_chat_click(self, e):
+        new_name = self.store.create_new_chat()
+        self.chat_name_input.value = new_name
+        self.refresh_from_store()
+        self._refresh_sidebar()
+        self.page.snack_bar = ft.SnackBar(ft.Text(f"Utworzono: {new_name}"))
+        self.page.snack_bar.open = True
+        self.page.update()
 
     def _build_top_bar(self):
         # Pole do wpisania nazwy czatu
@@ -343,10 +364,10 @@ class ChatUI:
                 ft.Icon(ft.Icons.SPEED, size=16, color=TEXT_COLOR_FADED),
                 ft.Text(f"Model: {model_name} | Czas: {gen_time:.2f}s", size=12, color=TEXT_COLOR),
             ]),
-            ft.Row([
-                ft.Icon(ft.Icons.TOKEN, size=16, color=TEXT_COLOR_FADED),
-                ft.Text(f"Tokeny: {t_tokens} (In: {p_tokens} / Out: {c_tokens})", size=12, color=TEXT_COLOR),
-            ]),
+            #ft.Row([
+            #    ft.Icon(ft.Icons.TOKEN, size=16, color=TEXT_COLOR_FADED),
+            #    ft.Text(f"Tokeny: {t_tokens} (In: {p_tokens} / Out: {c_tokens})", size=12, color=TEXT_COLOR),
+            #]),
             ft.Row([
                 ft.Icon(ft.Icons.SCHEDULE, size=16, color=TEXT_COLOR_FADED),
                 ft.Text(f"Wysłano: {timestamp}", size=12, color=TEXT_COLOR),

@@ -456,19 +456,35 @@ class ChatStore:
             self.path = new_path
 
     def load_session(self, session_name: str):
-        """Przełącza aktywną sesję na istniejący folder."""
         with self._lock:
-            # Ustawiamy ścieżki na wybrany folder
             new_dir = os.path.join(CHAT_DIR, session_name)
-            # Zakładamy, że plik json nazywa się tak samo jak folder
             new_path = os.path.join(new_dir, f"{session_name}.json")
 
-            if os.path.exists(new_path):
-                self.dir = new_dir
-                self.path = new_path
-                print(f"Załadowano sesję: {session_name}")
-                return True
-            else:
-                print(f"Błąd: Plik {new_path} nie istnieje!")
-                return False
+            os.makedirs(new_dir, exist_ok=True)
+            os.makedirs(os.path.join(new_dir, "images"), exist_ok=True)
+
+            if not os.path.exists(new_path):
+                with open(new_path, "w", encoding="utf-8") as f:
+                    json.dump([], f, ensure_ascii=False)
+                print(f"Utworzono nową strukturę dla sesji: {session_name}")
+
+            self.dir = new_dir
+            self.path = new_path
+
+            print(f"Aktywna sesja: {session_name}")
+            return True
+
+    def create_new_chat(self) -> str:
+        existing_chats = self.get_chats()
+        counter = 1
+
+        while True:
+            new_name = f"Czat_{counter}"
+            if new_name not in existing_chats:
+                break
+            counter += 1
+
+        self.load_session(new_name)
+
+        return new_name
 
