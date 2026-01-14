@@ -20,6 +20,9 @@ class ChatStore:
         self._lock = threading.Lock()
         os.makedirs(self.dir, exist_ok=True)
 
+        # Cache całego czatu w pamięci (żeby nie czytać/zapisywać JSON przy każdym progress update)
+        self._cache: list[dict] | None = None
+
         if clear_on_start:
             self._clear_file()
         else:
@@ -49,6 +52,8 @@ class ChatStore:
             # 1. Czyszczenie pliku JSON
             with open(self.path, "w", encoding="utf-8") as f:
                 json.dump([], f, ensure_ascii=False, indent=2)
+            # wyczyść cache
+            self._cache = []
 
             # 2. Czyszczenie folderu images
             img_dir = os.path.join(self.dir, "images")
@@ -60,6 +65,29 @@ class ChatStore:
                     print(f"Błąd podczas czyszczenia folderu images: {e}")
             else:
                 os.makedirs(img_dir, exist_ok=True)
+
+    def _load_all_unlocked(self) -> list:
+        """Wczytuje całą historię bez przejmowania locka (musisz zrobić to na zewnątrz)."""
+        if self._cache is not None:
+            return self._cache
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if not isinstance(data, list):
+                    data = []
+        except Exception:
+            data = []
+        self._cache = data
+        return data
+
+    def flush(self) -> None:
+        """Zapisuje aktualny cache do JSON (atomowo)."""
+        with self._lock:
+            data = self._load_all_unlocked()
+            tmp_path = self.path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, self.path)
 
     # ----------------------
     # Serializacja specjalnych obiektów (ChatCompletion-like)
@@ -319,15 +347,9 @@ class ChatStore:
                 rec["extra"] = self._make_json_safe(extra)
 
         with self._lock:
-            # Zapis do pliku z użyciem blokady (lock)
-            try:
-                with open(self.path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError):
-                data = []
-
+            data = self._load_all_unlocked()
             data.append(rec)
-            # Bezpieczny zapis do pliku tymczasowego
+            # append jest ważny dla historii -> zapis od razu
             tmp_path = self.path + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -335,32 +357,41 @@ class ChatStore:
 
         return rec
 
-    def update_message(self, message_id: str, text: Optional[str] = None, thought: Optional[str] = None,
-                       extra: Optional[dict] = None):
-        """Aktualizuje istniejącą wiadomość o podanym ID."""
+    def update_message(
+        self,
+        message_id: str,
+        text: Optional[str] = None,
+        thought: Optional[str] = None,
+        extra: Optional[dict] = None,
+        *,
+        persist: bool = True,
+    ):
+        """Aktualizuje istniejącą wiadomość o podanym ID.
+
+        Gdy persist=False, modyfikuje tylko cache w pamięci (bez IO). To jest kluczowe dla streamingu/progressu.
+        """
         with self._lock:
-            try:
-                with open(self.path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError):
-                return None
+            data = self._load_all_unlocked()
 
             found = False
             for rec in data:
                 if rec.get("id") == message_id:
-                    if text is not None: rec["text"] = text
+                    if text is not None:
+                        rec["text"] = text
                     if thought is not None:
-                        if "history_thought" not in rec:
-                            rec["history_thought"] = []
+                        # Historia thought jest przydatna, ale NIE zapisujemy jej w trakcie streamingu
+                        # (bo to generuje ogromny plik i IO). Dopniemy finalny thought przy persist=True.
+                        if persist:
+                            if "history_thought" not in rec:
+                                rec["history_thought"] = []
 
-                        current_thought = rec.get("thought")
-
-                        if thought != current_thought:
-                            rec["history_thought"].append({
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                                "content": thought
-                            })
-                            rec["thought"] = thought
+                            current_thought = rec.get("thought")
+                            if thought != current_thought:
+                                rec["history_thought"].append({
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    "content": thought,
+                                })
+                        rec["thought"] = thought
                     if extra is not None:
                         existing_extra = rec.get("extra", {})
                         norm_new = self._normalize_extra(extra)
@@ -370,26 +401,22 @@ class ChatStore:
                     found = True
                     break
 
-            if found:
+            if found and persist:
                 tmp_path = self.path + ".tmp"
                 with open(tmp_path, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
                 os.replace(tmp_path, self.path)
 
             return found
+
     # ----------------------
     # Wczytywanie
     # ----------------------
     def load_all(self) -> list:
         with self._lock:
-            try:
-                with open(self.path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if not isinstance(data, list):
-                        return []
-                    return data
-            except Exception:
-                return []
+            data = self._load_all_unlocked()
+            # zwróć kopię, żeby UI nie modyfikowało cache przez przypadek
+            return list(data)
 
     # -------
     # Zwracanie ścieżki dla innych
@@ -454,6 +481,8 @@ class ChatStore:
             # 4. Przełączenie aktywnej ścieżki w programie
             self.dir = new_dir
             self.path = new_path
+            # po zmianie pliku, cache musi być przeładowany
+            self._cache = None
 
     def load_session(self, session_name: str):
         with self._lock:
@@ -470,6 +499,8 @@ class ChatStore:
 
             self.dir = new_dir
             self.path = new_path
+            # po zmianie pliku, cache musi być przeładowany
+            self._cache = None
 
             print(f"Aktywna sesja: {session_name}")
             return True

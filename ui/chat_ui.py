@@ -501,7 +501,8 @@ class ChatUI:
             def on_progress(th: str):
                 if not self._active_bot_msg_id:
                     return
-                self.store.update_message(self._active_bot_msg_id, thought=th)
+                # Progres aktualizujemy tylko w pamięci (bez zapisu do JSON) - inaczej UI zwalnia z czasem.
+                self.store.update_message(self._active_bot_msg_id, thought=th, persist=False)
                 self.refresh_from_store()
 
             logic.on_progress = on_progress
@@ -510,7 +511,7 @@ class ChatUI:
                 logic.call_method(user_input)
 
             # jeśli logika nie emituje progresu, zostawiamy fallback
-            self.store.update_message(msg_id, thought="Odebrano dane, przetwarzam wynik...")
+            self.store.update_message(msg_id, thought="Odebrano dane, przetwarzam wynik...", persist=False)
             self.refresh_from_store()
 
             if hasattr(logic, "read_message"): logic.read_message()
@@ -538,13 +539,14 @@ class ChatUI:
                 message_id=msg_id,
                 text=str(txt),
                 thought=thought_final,
-                extra=extra
+                extra=extra,
+                persist=True,
             )
             self.refresh_from_store()
 
         except Exception as e:
             if msg_id:
-                self.store.update_message(msg_id, text=f"Błąd: {e}", thought="Wystąpił problem.")
+                self.store.update_message(msg_id, text=f"Błąd: {e}", thought="Wystąpił problem.", persist=True)
             else:
                 self.store.append_message("bot", f"Błąd systemowy: {e}", False, {"internal": True})
             self.refresh_from_store()
