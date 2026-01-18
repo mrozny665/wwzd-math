@@ -2,3 +2,5 @@ openai
 matplotlib
 numpy
 flet
+sympy
+environs
