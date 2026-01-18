@@ -473,7 +473,7 @@ class ChatLogic:
                         retry_callable=_retry_solve,
                         extra_context={
                             "equation": equation_str,
-                            "note": "Jeśli równanie zawiera funkcje typu sin/cos/log, system może tego nie obsługiwać.",
+                            "note": "Jeśli równanie zawiera logarytmy lub bardziej złożone funkcje specjalne, system może tego nie obsługiwać.",
                         },
                     )
 
@@ -880,4 +880,3 @@ class ChatLogic:
             "error": last_err,
             "attempts": max_attempts,
         }
-
