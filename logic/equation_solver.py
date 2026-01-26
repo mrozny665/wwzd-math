@@ -115,15 +115,15 @@ class EquationSolver:
                     return math.e
         return None
 
-    def _extract_basic_trig_data(self, left_node: ast.AST, right_node: ast.AST, var_name: str) -> Optional[Dict[str, Any]]:
-        func = self._match_basic_trig_call(left_node, var_name)
+    def _extract_basic_trig_data(self, left_ast: ast.AST, right_ast: ast.AST, var_name: str) -> Optional[Dict[str, Any]]:
+        func = self._match_basic_trig_call(left_ast, var_name)
         if func:
-            const_val = self._extract_constant_value(right_node)
+            const_val = self._extract_constant_value(right_ast)
             if const_val is not None:
                 return {"func": func, "value": float(const_val)}
-        func = self._match_basic_trig_call(right_node, var_name)
+        func = self._match_basic_trig_call(right_ast, var_name)
         if func:
-            const_val = self._extract_constant_value(left_node)
+            const_val = self._extract_constant_value(left_ast)
             if const_val is not None:
                 return {"func": func, "value": float(const_val)}
         return None
@@ -280,16 +280,16 @@ class EquationSolver:
             eq = self._normalize_expression(equation, var_name=var_name)
             left_s, right_s = eq.split("=", 1)
 
-            left_node = right_node = None
+            left_ast = right_ast = None
             parse_error = None
             try:
-                left_node = ast.parse(left_s, mode="eval").body
-                right_node = ast.parse(right_s, mode="eval").body
+                left_ast = ast.parse(left_s, mode="eval").body
+                right_ast = ast.parse(right_s, mode="eval").body
             except Exception as exc:
                 parse_error = exc
 
-            if left_node is not None and right_node is not None:
-                basic_trig = self._extract_basic_trig_data(left_node, right_node, var_name)
+            if left_ast is not None and right_ast is not None:
+                basic_trig = self._extract_basic_trig_data(left_ast, right_ast, var_name)
                 if basic_trig:
                     return self._solve_basic_trig_equation(basic_trig["func"], basic_trig["value"], var_name)
 
@@ -301,12 +301,12 @@ class EquationSolver:
                     right_str=right_s,
                 )
 
-            if left_node is not None and right_node is not None:
+            if left_ast is not None and right_ast is not None:
                 return self._solve_polynomial_equation(
                     eq,
                     var_name,
-                    left_node=left_node,
-                    right_node=right_node,
+                    left_ast=left_ast,
+                    right_ast=right_ast,
                 )
 
             if parse_error is not None:
@@ -315,14 +315,14 @@ class EquationSolver:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def _solve_polynomial_equation(self, eq: str, var_name: str, left_node: Optional[ast.AST] = None, right_node: Optional[ast.AST] = None) -> Dict[str, Any]:
-        if left_node is None or right_node is None:
+    def _solve_polynomial_equation(self, eq: str, var_name: str, left_ast: Optional[ast.AST] = None, right_ast: Optional[ast.AST] = None) -> Dict[str, Any]:
+        if left_ast is None or right_ast is None:
             left_s, right_s = eq.split("=", 1)
-            left_node = ast.parse(left_s, mode="eval").body
-            right_node = ast.parse(right_s, mode="eval").body
+            left_ast = ast.parse(left_s, mode="eval").body
+            right_ast = ast.parse(right_s, mode="eval").body
 
-        left_poly = self._ast_to_poly(left_node, var_name)
-        right_poly = self._ast_to_poly(right_node, var_name)
+        left_poly = self._ast_to_poly(left_ast, var_name)
+        right_poly = self._ast_to_poly(right_ast, var_name)
 
         res = {}
         for k, v in left_poly.items():
