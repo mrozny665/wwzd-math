@@ -589,7 +589,7 @@ class ChatLogic:
                         retry_callable=_retry_solve,
                         extra_context={
                             "equation": equation_str,
-                            "note": "",
+                            "note": "Jeśli równanie zawiera logarytmy lub bardziej złożone funkcje specjalne, system może tego nie obsługiwać.",
                         },
                     )
 

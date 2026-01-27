@@ -37,112 +37,127 @@ class CalculusEngine:
         self._sympy_available = sp is not None
 
     def differentiate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        try:
-            self._ensure_sympy()
-        except RuntimeError as exc:
-            return {"error": str(exc)}
+        def _error(message: str) -> Dict[str, Any]:
+            return {"success": False, "error": message}
+
         if not isinstance(payload, dict):
             payload = {}
 
-        expression = payload.get("expression") or payload.get("expr")
-        if not expression:
-            return {"error": "Brak wyrażenia do zróżniczkowania."}
-        var_name = payload.get("variable") or payload.get("var") or "x"
-        var_name = (str(var_name).strip() or "x")
-        order_value = payload.get("order") or payload.get("nth") or 1
         try:
-            order = int(order_value)
-            if order < 1:
-                raise ValueError
-        except Exception:
-            return {"error": "Parametr 'order' musi być dodatnią liczbą całkowitą."}
+            self._ensure_sympy()
 
-        try:
-            expr, symbol = self._parse_sympy_expression(expression, var_name)
-            derivative = sp.simplify(sp.diff(expr, symbol, order))
-        except Exception as exc:
-            return {"error": f"Nie można policzyć pochodnej: {exc}"}
+            expression = payload.get("expression") or payload.get("expr")
+            if not expression:
+                return _error("Brak wyrażenia do zróżniczkowania.")
+            var_name = payload.get("variable") or payload.get("var") or "x"
+            var_name = (str(var_name).strip() or "x")
+            order_value = payload.get("order") or payload.get("nth") or 1
 
-        result = {
-            "expression": _format_expression_string(expression),
-            "variable": var_name,
-            "order": order,
-            "derivative": _format_expression_string(derivative),
-        }
-
-        eval_point = None
-        for key in ("at", "point", "value", "evaluate_at"):
-            if key in payload and payload[key] is not None:
-                eval_point = payload[key]
-                break
-
-        if eval_point is not None:
             try:
-                val_expr = self._sympify_value(eval_point)
-                evaluated = sp.simplify(derivative.subs(symbol, val_expr))
-                result["at"] = self._format_sympy_output(val_expr)
-                result["value_at"] = self._format_sympy_output(evaluated)
-            except Exception as exc:
-                result["value_error"] = f"Nie udało się obliczyć wartości w punkcie: {exc}"
+                order = int(order_value)
+                if order < 1:
+                    raise ValueError
+            except Exception:
+                return _error("Parametr 'order' musi być dodatnią liczbą całkowitą.")
 
-        return result
+            try:
+                expr, symbol = self._parse_sympy_expression(expression, var_name)
+                derivative = sp.simplify(sp.diff(expr, symbol, order))
+            except Exception as exc:
+                return _error(f"Nie można policzyć pochodnej: {exc}")
+
+            result = {
+                "expression": _format_expression_string(expression),
+                "variable": var_name,
+                "order": order,
+                "derivative": _format_expression_string(derivative),
+            }
+
+            eval_point = None
+            for key in ("at", "point", "value", "evaluate_at"):
+                if key in payload and payload[key] is not None:
+                    eval_point = payload[key]
+                    break
+
+            if eval_point is not None:
+                try:
+                    val_expr = self._sympify_value(eval_point)
+                    evaluated = sp.simplify(derivative.subs(symbol, val_expr))
+                    result["at"] = self._format_sympy_output(val_expr)
+                    result["value_at"] = self._format_sympy_output(evaluated)
+                except Exception as exc:
+                    result["value_error"] = f"Nie udało się obliczyć wartości w punkcie: {exc}"
+
+            result["success"] = True
+            return result
+        except RuntimeError as exc:
+            return _error(str(exc))
+        except Exception as exc:
+            return _error(f"Nieoczekiwany błąd podczas liczenia pochodnej: {exc}")
 
     def integrate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        try:
-            self._ensure_sympy()
-        except RuntimeError as exc:
-            return {"error": str(exc)}
+        def _error(message: str) -> Dict[str, Any]:
+            return {"success": False, "error": message}
+
         if not isinstance(payload, dict):
             payload = {}
 
-        expression = payload.get("expression") or payload.get("expr")
-        if not expression:
-            return {"error": "Brak wyrażenia do scałkowania."}
-        var_name = payload.get("variable") or payload.get("var") or "x"
-        var_name = (str(var_name).strip() or "x")
-
         try:
-            expr, symbol = self._parse_sympy_expression(expression, var_name)
-            integral_result = sp.integrate(expr, symbol)
-        except Exception as exc:
-            return {"error": f"Nie można policzyć całki: {exc}"}
+            self._ensure_sympy()
 
-        bounds = payload.get("bounds") or payload.get("limits")
-        lower_raw = upper_raw = None
-        if isinstance(bounds, (list, tuple)) and len(bounds) == 2:
-            lower_raw, upper_raw = bounds
-        else:
-            for key in ("lower", "from", "a"):
-                if key in payload and payload[key] is not None:
-                    lower_raw = payload[key]
-                    break
-            for key in ("upper", "to", "b"):
-                if key in payload and payload[key] is not None:
-                    upper_raw = payload[key]
-                    break
+            expression = payload.get("expression") or payload.get("expr")
+            if not expression:
+                return _error("Brak wyrażenia do scałkowania.")
+            var_name = payload.get("variable") or payload.get("var") or "x"
+            var_name = (str(var_name).strip() or "x")
 
-        result = {
-            "expression": _format_expression_string(expression),
-            "variable": var_name,
-            "integral_result": _format_expression_string(integral_result),
-            "type": "indefinite",
-        }
-
-        if lower_raw is not None and upper_raw is not None:
             try:
-                lower = self._sympify_value(lower_raw)
-                upper = self._sympify_value(upper_raw)
-                definite_value = sp.integrate(expr, (symbol, lower, upper))
-                result.update({
-                    "type": "definite",
-                    "lower": self._format_sympy_output(lower),
-                    "upper": self._format_sympy_output(upper),
-                    "value": self._format_sympy_output(definite_value),
-                })
+                expr, symbol = self._parse_sympy_expression(expression, var_name)
+                integral_result = sp.integrate(expr, symbol)
             except Exception as exc:
-                result["value_error"] = f"Nie udało się policzyć całki oznaczonej: {exc}"
+                return _error(f"Nie można policzyć całki: {exc}")
 
-        return result
+            bounds = payload.get("bounds") or payload.get("limits")
+            lower_raw = upper_raw = None
+            if isinstance(bounds, (list, tuple)) and len(bounds) == 2:
+                lower_raw, upper_raw = bounds
+            else:
+                for key in ("lower", "from", "a"):
+                    if key in payload and payload[key] is not None:
+                        lower_raw = payload[key]
+                        break
+                for key in ("upper", "to", "b"):
+                    if key in payload and payload[key] is not None:
+                        upper_raw = payload[key]
+                        break
+
+            result = {
+                "expression": _format_expression_string(expression),
+                "variable": var_name,
+                "integral_result": _format_expression_string(integral_result),
+                "type": "indefinite",
+            }
+
+            if lower_raw is not None and upper_raw is not None:
+                try:
+                    lower = self._sympify_value(lower_raw)
+                    upper = self._sympify_value(upper_raw)
+                    definite_value = sp.integrate(expr, (symbol, lower, upper))
+                    result.update({
+                        "type": "definite",
+                        "lower": self._format_sympy_output(lower),
+                        "upper": self._format_sympy_output(upper),
+                        "value": self._format_sympy_output(definite_value),
+                    })
+                except Exception as exc:
+                    result["value_error"] = f"Nie udało się policzyć całki oznaczonej: {exc}"
+
+            result["success"] = True
+            return result
+        except RuntimeError as exc:
+            return _error(str(exc))
+        except Exception as exc:
+            return _error(f"Nieoczekiwany błąd podczas liczenia całki: {exc}")
 
     def _ensure_sympy(self):
         if not self._sympy_available:
