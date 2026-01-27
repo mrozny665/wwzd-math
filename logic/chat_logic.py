@@ -381,7 +381,7 @@ class ChatLogic:
         except json.JSONDecodeError:
             pass
 
-        if re.match(r"^\{'.*'\}$", cont.strip()):
+        if re.match(r"^\{'.*'}$", cont.strip()):
             try:
                 fixed = cont.replace("'", '"')
                 self.data = json.loads(fixed)
@@ -421,23 +421,139 @@ class ChatLogic:
             # --- OBLICZENIA ---
             if normalized_action in ("evaluatemath", "evaluate"):
                 expr_str = "" if expr is None else str(expr)
-                msg, result_value, error_value, success = self._handle_math_action(expr_str)
                 expr = expr_str
-                message_text += msg
+
+                # spróbuj raz
+                msg, result_value, error_value, success = self._handle_math_action(expr_str)
+                if success:
+                    message_text += msg
+                else:
+                    # retry/ask_user/unsupported przez wspólną politykę
+                    def _retry_eval(patched_input: Optional[str] = None):
+                        expr_try = patched_input.strip() if isinstance(patched_input, str) and patched_input.strip() else expr_str
+                        math_res = self.safe_eval_math(expr_try)
+                        if "result" in math_res:
+                            return {"expression": expr_try, "result": math_res["result"]}
+                        raise ValueError(math_res.get("error") or "Nieznany błąd")
+
+                    flow = self._run_action_with_retry(
+                        stage="evaluate_math",
+                        initial_error=error_value or "Błąd obliczeń",
+                        retry_callable=_retry_eval,
+                        extra_context={"expression": expr_str},
+                    )
+
+                    if flow.get("status") == "ok":
+                        payload = flow.get("result") or {}
+                        fixed_expr = payload.get("expression", expr_str)
+                        result_value = payload.get("result")
+                        if fixed_expr != expr_str:
+                            message_text += f"✅ Poprawiłem zapis i spróbowałem ponownie: {fixed_expr}\n"
+                            expr = fixed_expr
+                        message_text += f"📞 Model wykrył działanie: {expr}\n🧮 Wynik obliczenia: {expr} = {result_value}"
+                        success = True
+                        error_value = None
+                    elif flow.get("status") == "unsupported":
+                        message_text += f"⚠️ {flow.get('unsupported_message') or error_value}"
+                        success = False
+                    else:
+                        q = flow.get("user_question")
+                        if q:
+                            message_text += f"⚠️ Nie mogę tego policzyć automatycznie. {q}"
+                        else:
+                            message_text += f"⚠️ Błąd podczas obliczania: {error_value}"
+                        success = False
 
             # --- POCHODNA ---
             elif normalized_action in ("differentiate", "derivative"):
                 expr_str = "" if expr is None else str(expr)
-                msg, result_value, error_value, success = self._handle_derivative_action(ai, expr_str)
                 expr = expr_str
-                message_text += msg
+
+                msg, result_value, error_value, success = self._handle_derivative_action(ai, expr_str)
+                if success:
+                    message_text += msg
+                else:
+                    def _retry_diff(patched_input: Optional[str] = None):
+                        patched_payload = dict(ai) if isinstance(ai, dict) else {}
+                        if patched_input is not None:
+                            patched_payload["expression"] = patched_input
+                        elif patched_payload.get("expression") is None:
+                            patched_payload["expression"] = expr_str
+
+                        # _handle_derivative_action normalizuje expression
+                        msg2, res2, err2, ok2 = self._handle_derivative_action(patched_payload, str(patched_payload.get("expression") or expr_str))
+                        if ok2:
+                            return {"payload": patched_payload, "result": res2, "message": msg2}
+                        raise ValueError(err2 or "Nieznany błąd")
+
+                    flow = self._run_action_with_retry(
+                        stage="differentiate",
+                        initial_error=error_value or "Błąd pochodnej",
+                        retry_callable=_retry_diff,
+                        extra_context={"expression": expr_str, "action_input": ai},
+                    )
+
+                    if flow.get("status") == "ok":
+                        payload = flow.get("result") or {}
+                        result_value = payload.get("result")
+                        message_text += payload.get("message") or msg
+                        success = True
+                        error_value = None
+                    elif flow.get("status") == "unsupported":
+                        message_text += f"⚠️ {flow.get('unsupported_message') or error_value}"
+                        success = False
+                    else:
+                        q = flow.get("user_question")
+                        if q:
+                            message_text += f"⚠️ Nie mogę tego policzyć automatycznie. {q}"
+                        else:
+                            message_text += f"⚠️ {error_value}"
+                        success = False
 
             # --- CAŁKA ---
             elif normalized_action in ("integrate", "integral"):
                 expr_str = "" if expr is None else str(expr)
-                msg, result_value, error_value, success = self._handle_integral_action(ai, expr_str)
                 expr = expr_str
-                message_text += msg
+
+                msg, result_value, error_value, success = self._handle_integral_action(ai, expr_str)
+                if success:
+                    message_text += msg
+                else:
+                    def _retry_int(patched_input: Optional[str] = None):
+                        patched_payload = dict(ai) if isinstance(ai, dict) else {}
+                        if patched_input is not None:
+                            patched_payload["expression"] = patched_input
+                        elif patched_payload.get("expression") is None:
+                            patched_payload["expression"] = expr_str
+
+                        msg2, res2, err2, ok2 = self._handle_integral_action(patched_payload, str(patched_payload.get("expression") or expr_str))
+                        if ok2:
+                            return {"payload": patched_payload, "result": res2, "message": msg2}
+                        raise ValueError(err2 or "Nieznany błąd")
+
+                    flow = self._run_action_with_retry(
+                        stage="integrate",
+                        initial_error=error_value or "Błąd całki",
+                        retry_callable=_retry_int,
+                        extra_context={"expression": expr_str, "action_input": ai},
+                    )
+
+                    if flow.get("status") == "ok":
+                        payload = flow.get("result") or {}
+                        result_value = payload.get("result")
+                        message_text += payload.get("message") or msg
+                        success = True
+                        error_value = None
+                    elif flow.get("status") == "unsupported":
+                        message_text += f"⚠️ {flow.get('unsupported_message') or error_value}"
+                        success = False
+                    else:
+                        q = flow.get("user_question")
+                        if q:
+                            message_text += f"⚠️ Nie mogę tego policzyć automatycznie. {q}"
+                        else:
+                            message_text += f"⚠️ {error_value}"
+                        success = False
 
             # --- RÓWNANIE ---
             elif normalized_action == "solveequation":
@@ -518,14 +634,54 @@ class ChatLogic:
                 if expr:
                     expr_str = str(expr)
                     expr = expr_str
+
                     message_text += f"📉 Generuję wykres funkcji: f(x) = {expr_str}"
-                    path = self.plot_logic._generate_plot_image(expr_str, x_min, x_max)
+                    try:
+                        path = self.plot_logic._generate_plot_image(expr_str, x_min, x_max)
+                    except Exception as e:
+                        path = None
+                        error_value = str(e)
+
                     if path:
                         image_path = path
                         message_text += "\n(Wykres wygenerowany)"
+                        success = True
                     else:
-                        message_text += "\n⚠️ Błąd generowania wykresu."
-                        success = False
+                        # obsługa błędu przez retry politykę
+                        def _retry_plot(patched_input: Optional[str] = None):
+                            expr_try = patched_input.strip() if isinstance(patched_input, str) and patched_input.strip() else expr_str
+                            p = self.plot_logic._generate_plot_image(expr_try, x_min, x_max)
+                            if p:
+                                return {"expression": expr_try, "image_path": p}
+                            raise ValueError("Błąd generowania wykresu")
+
+                        flow = self._run_action_with_retry(
+                            stage="plot_function",
+                            initial_error=error_value or "Błąd generowania wykresu",
+                            retry_callable=_retry_plot,
+                            extra_context={"expression": expr_str, "min": x_min, "max": x_max},
+                        )
+
+                        if flow.get("status") == "ok":
+                            payload = flow.get("result") or {}
+                            fixed_expr = payload.get("expression", expr_str)
+                            image_path = payload.get("image_path")
+                            if fixed_expr != expr_str:
+                                message_text += f"\n✅ Poprawiłem zapis i spróbowałem ponownie: {fixed_expr}"
+                                expr = fixed_expr
+                            message_text += "\n(Wykres wygenerowany)"
+                            success = True
+                            error_value = None
+                        elif flow.get("status") == "unsupported":
+                            message_text += f"\n⚠️ {flow.get('unsupported_message') or (error_value or 'Błąd generowania wykresu')}"
+                            success = False
+                        else:
+                            q = flow.get("user_question")
+                            if q:
+                                message_text += f"\n⚠️ Nie mogę tego wygenerować automatycznie. {q}"
+                            else:
+                                message_text += "\n⚠️ Błąd generowania wykresu."
+                            success = False
 
             # Jeśli akcja była rozpoznana, ale nie ustawiono wiadomości (edge case)
             if not message_text and action is not None:
@@ -759,7 +915,7 @@ class ChatLogic:
         error: Exception | str,
         *,
         stage: str,
-        retry_callable: Callable[[], Any],
+        retry_callable: Callable[..., Any],
         max_attempts: int = 2,
         extra_context: Optional[dict] = None,
         model: Optional[str] = None,
@@ -879,4 +1035,39 @@ class ChatLogic:
             "unsupported_message": None,
             "error": last_err,
             "attempts": max_attempts,
+        }
+
+    def _run_action_with_retry(
+        self,
+        *,
+        stage: str,
+        initial_error: Exception | str,
+        retry_callable: Callable[..., Any],
+        extra_context: Optional[dict] = None,
+        model: Optional[str] = None,
+    ) -> dict:
+        """Uruchamia handle_calculation_error_with_retry i zwraca ustandaryzowany wynik.
+
+        Zwraca dict:
+        {
+          "status": "ok"|"ask_user"|"unsupported"|"failed",
+          "result": Any|None,
+          "error": str|None,
+          "user_question": str|None,
+          "unsupported_message": str|None
+        }
+        """
+        flow = self.handle_calculation_error_with_retry(
+            initial_error,
+            stage=stage,
+            retry_callable=retry_callable,
+            extra_context=extra_context,
+            model=model,
+        )
+        return {
+            "status": flow.get("status"),
+            "result": flow.get("result"),
+            "error": flow.get("error"),
+            "user_question": flow.get("user_question"),
+            "unsupported_message": flow.get("unsupported_message"),
         }
